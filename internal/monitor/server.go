@@ -42,6 +42,13 @@ type NodeManager interface {
 }
 
 // Sentinel errors for node operations.
+const (
+	minConcurrentProbes   int64 = 10
+	singleProbeTimeout          = 10 * time.Second
+	batchProbeWaveOverhead      = 2 * time.Second
+	minBatchProbeTimeout        = 10 * time.Minute
+)
+
 var (
 	ErrNodeNotFound = errors.New("节点不存在")
 	ErrNodeConflict = errors.New("节点名称或端口已存在")
@@ -80,7 +87,8 @@ type Server struct {
 	sessionTTL time.Duration
 
 	// Concurrency control
-	probeSem *semaphore.Weighted
+	probeSem            *semaphore.Weighted
+	maxConcurrentProbes int64
 
 	subRefresher SubscriptionRefresher
 	nodeMgr      NodeManager
@@ -97,8 +105,8 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 
 	// Calculate max concurrent probes
 	maxConcurrentProbes := int64(runtime.NumCPU() * 4)
-	if maxConcurrentProbes < 10 {
-		maxConcurrentProbes = 10
+	if maxConcurrentProbes < minConcurrentProbes {
+		maxConcurrentProbes = minConcurrentProbes
 	}
 
 	s := &Server{
@@ -107,7 +115,8 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 		logger:     logger,
 		sessions:   make(map[string]*Session),
 		sessionTTL: 24 * time.Hour,
-		probeSem:   semaphore.NewWeighted(maxConcurrentProbes),
+		probeSem:            semaphore.NewWeighted(maxConcurrentProbes),
+		maxConcurrentProbes: maxConcurrentProbes,
 	}
 
 	// Start session cleanup goroutine
@@ -323,7 +332,7 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), singleProbeTimeout)
 		defer cancel()
 		latency, err := s.mgr.Probe(ctx, tag)
 		if err != nil {
@@ -348,6 +357,19 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (s *Server) batchProbeTimeout(total int) time.Duration {
+	concurrency := int(s.maxConcurrentProbes)
+	if concurrency <= 0 {
+		concurrency = int(minConcurrentProbes)
+	}
+	waves := (total + concurrency - 1) / concurrency
+	timeout := time.Duration(waves) * (singleProbeTimeout + batchProbeWaveOverhead)
+	if timeout < minBatchProbeTimeout {
+		timeout = minBatchProbeTimeout
+	}
+	return timeout
 }
 
 // handleProbeAll probes all nodes in batches and returns results via SSE
@@ -378,13 +400,20 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	batchTimeout := s.batchProbeTimeout(total)
+
 	// Send start event
-	startData, _ := json.Marshal(map[string]any{"type": "start", "total": total})
+	startData, _ := json.Marshal(map[string]any{
+		"type":            "start",
+		"total":           total,
+		"timeout_seconds": int(batchTimeout.Seconds()),
+		"concurrency":     s.maxConcurrentProbes,
+	})
 	fmt.Fprintf(w, "data: %s\n\n", startData)
 	flusher.Flush()
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), batchTimeout)
 	defer cancel()
 
 	// Probe all nodes with semaphore control
@@ -415,7 +444,7 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 			defer s.probeSem.Release(1)
 
 			// Execute probe
-			probeCtx, probeCancel := context.WithTimeout(ctx, 10*time.Second)
+			probeCtx, probeCancel := context.WithTimeout(ctx, singleProbeTimeout)
 			defer probeCancel()
 
 			latency, err := s.mgr.Probe(probeCtx, snap.Tag)
