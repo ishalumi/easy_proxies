@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"testing"
+	"time"
 
 	"easy_proxies/internal/monitor"
 	M "github.com/sagernet/sing/common/metadata"
@@ -91,4 +92,61 @@ func TestHTTPProbeSupportsHTTPS(t *testing.T) {
 	if latency <= 0 {
 		t.Fatalf("expected positive latency, got %v", latency)
 	}
+}
+
+func TestAvailableMembersLockedPrefersHealthyNodes(t *testing.T) {
+	mgr, err := monitor.NewManager(monitor.Config{})
+	if err != nil {
+		t.Fatalf("new monitor manager: %v", err)
+	}
+
+	healthy := mgr.Register(monitor.NodeInfo{Tag: "healthy"})
+	healthy.MarkInitialCheckDone(true)
+	pending := mgr.Register(monitor.NodeInfo{Tag: "pending"})
+	failed := mgr.Register(monitor.NodeInfo{Tag: "failed"})
+	failed.MarkInitialCheckDone(false)
+
+	p := &poolOutbound{
+		members: []*memberState{
+			{tag: "healthy", entry: healthy},
+			{tag: "pending", entry: pending},
+			{tag: "failed", entry: failed},
+		},
+	}
+
+	got := p.availableMembersLocked(time.Now(), "", make([]*memberState, 0, 3))
+	if len(got) != 1 || got[0].tag != "healthy" {
+		t.Fatalf("expected only healthy member, got %+v", extractTags(got))
+	}
+}
+
+func TestAvailableMembersLockedFallsBackToPendingNodes(t *testing.T) {
+	mgr, err := monitor.NewManager(monitor.Config{})
+	if err != nil {
+		t.Fatalf("new monitor manager: %v", err)
+	}
+
+	failed := mgr.Register(monitor.NodeInfo{Tag: "failed"})
+	failed.MarkInitialCheckDone(false)
+	pending := mgr.Register(monitor.NodeInfo{Tag: "pending"})
+
+	p := &poolOutbound{
+		members: []*memberState{
+			{tag: "failed", entry: failed},
+			{tag: "pending", entry: pending},
+		},
+	}
+
+	got := p.availableMembersLocked(time.Now(), "", make([]*memberState, 0, 2))
+	if len(got) != 1 || got[0].tag != "pending" {
+		t.Fatalf("expected only pending member, got %+v", extractTags(got))
+	}
+}
+
+func extractTags(members []*memberState) []string {
+	tags := make([]string, 0, len(members))
+	for _, member := range members {
+		tags = append(tags, member.tag)
+	}
+	return tags
 }

@@ -681,3 +681,13 @@ func (h *EntryHandle) MarkAvailable(available bool) {
 	h.ref.available = available
 	h.ref.mu.Unlock()
 }
+
+// HealthState reports whether the initial probe has completed and whether the node is currently healthy.
+func (h *EntryHandle) HealthState() (initialCheckDone bool, available bool) {
+	if h == nil || h.ref == nil {
+		return false, false
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return h.ref.initialCheckDone, h.ref.available
+}

@@ -399,8 +399,60 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 
 func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf []*memberState) []*memberState {
 	result := buf[:0]
+	healthyCount := 0
+	pendingCount := 0
+
 	for _, member := range p.members {
 		// Check blacklist via shared state (auto-clears if expired)
+		if member.shared != nil && member.shared.isBlacklisted(now) {
+			continue
+		}
+		if network != "" && !common.Contains(member.outbound.Network(), network) {
+			continue
+		}
+
+		initialDone, available := false, false
+		if member.entry != nil {
+			initialDone, available = member.entry.HealthState()
+		}
+
+		if initialDone && available {
+			result = append(result, member)
+			healthyCount++
+			continue
+		}
+		if !initialDone {
+			pendingCount++
+		}
+	}
+
+	if healthyCount > 0 {
+		return result
+	}
+
+	if pendingCount > 0 {
+		result = result[:0]
+		for _, member := range p.members {
+			if member.shared != nil && member.shared.isBlacklisted(now) {
+				continue
+			}
+			if network != "" && !common.Contains(member.outbound.Network(), network) {
+				continue
+			}
+
+			initialDone, _ := false, false
+			if member.entry != nil {
+				initialDone, _ = member.entry.HealthState()
+			}
+			if !initialDone {
+				result = append(result, member)
+			}
+		}
+		return result
+	}
+
+	result = result[:0]
+	for _, member := range p.members {
 		if member.shared != nil && member.shared.isBlacklisted(now) {
 			continue
 		}
