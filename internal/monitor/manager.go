@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"runtime"
 	"sort"
 	"strconv"
@@ -26,6 +27,16 @@ type Config struct {
 	ProxyPassword  string // 代理池的密码（用于导出）
 	ExternalIP     string // 外部 IP 地址，用于导出时替换 0.0.0.0
 	SkipCertVerify bool   // 全局跳过 SSL 证书验证
+}
+
+// ProbeRequest is the normalized health-check request derived from probe_target.
+type ProbeRequest struct {
+	Destination    M.Socksaddr
+	Scheme         string
+	HostHeader     string
+	ServerName     string
+	Path           string
+	SkipCertVerify bool
 }
 
 // NodeInfo is static metadata about a proxy entry.
@@ -97,7 +108,7 @@ type entry struct {
 // Manager aggregates all node states for the UI/API.
 type Manager struct {
 	cfg        Config
-	probeDst   M.Socksaddr
+	probeReq   ProbeRequest
 	probeReady bool
 	mu         sync.RWMutex
 	nodes      map[string]*entry
@@ -122,33 +133,97 @@ func NewManager(cfg Config) (*Manager, error) {
 		cancel: cancel,
 	}
 	if cfg.ProbeTarget != "" {
-		target := cfg.ProbeTarget
-		// Strip URL scheme if present (e.g., "https://www.google.com:443" -> "www.google.com:443")
-		if strings.HasPrefix(target, "https://") {
-			target = strings.TrimPrefix(target, "https://")
-		} else if strings.HasPrefix(target, "http://") {
-			target = strings.TrimPrefix(target, "http://")
+		probeReq, ok := parseProbeRequest(cfg.ProbeTarget, cfg.SkipCertVerify)
+		if ok {
+			m.probeReq = probeReq
+			m.probeReady = true
 		}
-		// Remove trailing path if present
-		if idx := strings.Index(target, "/"); idx != -1 {
-			target = target[:idx]
+	}
+	return m, nil
+}
+
+func parseProbeRequest(raw string, skipCertVerify bool) (ProbeRequest, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ProbeRequest{}, false
+	}
+
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil || u.Hostname() == "" {
+			return ProbeRequest{}, false
 		}
-		host, port, err := net.SplitHostPort(target)
-		if err != nil {
-			// If no port specified, use default based on original scheme
-			if strings.HasPrefix(cfg.ProbeTarget, "https://") {
-				host = target
+
+		scheme := strings.ToLower(u.Scheme)
+		if scheme == "" {
+			scheme = "http"
+		}
+		if scheme != "http" && scheme != "https" {
+			return ProbeRequest{}, false
+		}
+
+		host := u.Hostname()
+		port := u.Port()
+		if port == "" {
+			if scheme == "https" {
 				port = "443"
 			} else {
-				host = target
 				port = "80"
 			}
 		}
-		parsed := M.ParseSocksaddrHostPort(host, parsePort(port))
-		m.probeDst = parsed
-		m.probeReady = true
+
+		path := u.EscapedPath()
+		if path == "" {
+			path = "/"
+		}
+		if u.RawQuery != "" {
+			path += "?" + u.RawQuery
+		}
+
+		hostHeader := u.Host
+		if hostHeader == "" {
+			hostHeader = host
+		}
+
+		return ProbeRequest{
+			Destination:    M.ParseSocksaddrHostPort(host, parsePort(port)),
+			Scheme:         scheme,
+			HostHeader:     hostHeader,
+			ServerName:     host,
+			Path:           path,
+			SkipCertVerify: skipCertVerify,
+		}, true
 	}
-	return m, nil
+
+	target := raw
+	path := "/"
+	if idx := strings.Index(target, "/"); idx != -1 {
+		path = target[idx:]
+		target = target[:idx]
+		if path == "" {
+			path = "/"
+		}
+	}
+
+	host := target
+	port := "80"
+	if parsedHost, parsedPort, err := net.SplitHostPort(target); err == nil {
+		host = parsedHost
+		port = parsedPort
+	}
+
+	if host == "" {
+		return ProbeRequest{}, false
+	}
+
+	return ProbeRequest{
+		Destination:    M.ParseSocksaddrHostPort(host, parsePort(port)),
+		Scheme:         "http",
+		HostHeader:     target,
+		ServerName:     host,
+		Path:           path,
+		SkipCertVerify: skipCertVerify,
+	}, true
 }
 
 // SetLogger sets the logger for the manager.
@@ -295,12 +370,12 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 	return &EntryHandle{ref: e}
 }
 
-// DestinationForProbe exposes the configured destination for health checks.
-func (m *Manager) DestinationForProbe() (M.Socksaddr, bool) {
+// ProbeRequest returns the normalized request used for health checks.
+func (m *Manager) ProbeRequest() (ProbeRequest, bool) {
 	if !m.probeReady {
-		return M.Socksaddr{}, false
+		return ProbeRequest{}, false
 	}
-	return m.probeDst, true
+	return m.probeReq, true
 }
 
 // Snapshot returns a sorted copy of current node states.
