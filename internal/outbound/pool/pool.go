@@ -29,9 +29,11 @@ const (
 	// Tag is the default outbound tag used by builder.
 	Tag = "proxy-pool"
 
-	modeSequential = "sequential"
-	modeRandom     = "random"
-	modeBalance    = "balance"
+	modeSequential         = "sequential"
+	modeRandom             = "random"
+	modeBalance            = "balance"
+	startupProbeWorkers    = 20
+	startupProbeTimeout    = 15 * time.Second
 )
 
 // Options controls pool outbound behaviour.
@@ -263,56 +265,67 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 	copy(members, p.members)
 	p.mu.Unlock()
 
-	availableCount := 0
-	failedCount := 0
-
-	for _, member := range members {
-		// Create a timeout context for each probe
-		ctx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
-
-		start := time.Now()
-		conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, destination)
-
-		if err != nil {
-			p.logger.Warn("initial probe failed for ", member.tag, ": ", err)
-			failedCount++
-			if member.entry != nil {
-				member.entry.RecordFailure(err)
-				member.entry.MarkInitialCheckDone(false) // 标记为不可用
-			}
-			cancel()
-			continue
-		}
-
-		// Perform HTTP probe to measure actual latency (TTFB)
-		_, err = httpProbe(conn, destination.AddrString())
-		conn.Close()
-
-		if err != nil {
-			p.logger.Warn("initial HTTP probe failed for ", member.tag, ": ", err)
-			failedCount++
-			if member.entry != nil {
-				member.entry.RecordFailure(err)
-				member.entry.MarkInitialCheckDone(false)
-			}
-			cancel()
-			continue
-		}
-
-		// Total latency = dial + HTTP probe
-		latency := time.Since(start)
-		latencyMs := latency.Milliseconds()
-		p.logger.Info("initial probe success for ", member.tag, ", latency: ", latencyMs, "ms")
-		availableCount++
-		if member.entry != nil {
-			member.entry.RecordSuccessWithLatency(latency)
-			member.entry.MarkInitialCheckDone(true)
-		}
-
-		cancel()
+	workerLimit := startupProbeWorkers
+	if len(members) < workerLimit {
+		workerLimit = len(members)
+	}
+	if workerLimit == 0 {
+		return
 	}
 
-	p.logger.Info("initial health check completed: ", availableCount, " available, ", failedCount, " failed")
+	sem := make(chan struct{}, workerLimit)
+	var wg sync.WaitGroup
+	var availableCount atomic.Int32
+	var failedCount atomic.Int32
+
+	for _, member := range members {
+		sem <- struct{}{}
+		wg.Add(1)
+
+		go func(member *memberState) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			ctx, cancel := context.WithTimeout(p.ctx, startupProbeTimeout)
+			defer cancel()
+
+			start := time.Now()
+			conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, destination)
+			if err != nil {
+				p.logger.Warn("initial probe failed for ", member.tag, ": ", err)
+				failedCount.Add(1)
+				if member.entry != nil {
+					member.entry.RecordFailure(err)
+					member.entry.MarkInitialCheckDone(false)
+				}
+				return
+			}
+
+			_, err = httpProbe(conn, destination.AddrString())
+			conn.Close()
+			if err != nil {
+				p.logger.Warn("initial HTTP probe failed for ", member.tag, ": ", err)
+				failedCount.Add(1)
+				if member.entry != nil {
+					member.entry.RecordFailure(err)
+					member.entry.MarkInitialCheckDone(false)
+				}
+				return
+			}
+
+			latency := time.Since(start)
+			latencyMs := latency.Milliseconds()
+			p.logger.Info("initial probe success for ", member.tag, ", latency: ", latencyMs, "ms")
+			availableCount.Add(1)
+			if member.entry != nil {
+				member.entry.RecordSuccessWithLatency(latency)
+				member.entry.MarkInitialCheckDone(true)
+			}
+		}(member)
+	}
+
+	wg.Wait()
+	p.logger.Info("initial health check completed: ", availableCount.Load(), " available, ", failedCount.Load(), " failed")
 }
 
 func (p *poolOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {

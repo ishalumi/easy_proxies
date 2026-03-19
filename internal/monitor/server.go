@@ -43,7 +43,7 @@ type NodeManager interface {
 
 // Sentinel errors for node operations.
 const (
-	minConcurrentProbes   int64 = 10
+	minConcurrentProbes   int64 = 20
 	singleProbeTimeout          = 10 * time.Second
 	batchProbeWaveOverhead      = 2 * time.Second
 	minBatchProbeTimeout        = 10 * time.Minute
