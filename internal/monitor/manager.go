@@ -345,6 +345,19 @@ func (m *Manager) Stop() {
 	}
 }
 
+// Reset 清空所有节点状态（Reload 时调用，释放旧 probe 闭包引用）
+func (m *Manager) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.nodes {
+		e.mu.Lock()
+		e.probe = nil
+		e.release = nil
+		e.mu.Unlock()
+	}
+	m.nodes = make(map[string]*entry)
+}
+
 func parsePort(value string) uint16 {
 	p, err := strconv.Atoi(value)
 	if err != nil || p <= 0 || p > 65535 {

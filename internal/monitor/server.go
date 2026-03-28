@@ -85,6 +85,7 @@ type Server struct {
 	sessionMu  sync.RWMutex
 	sessions   map[string]*Session
 	sessionTTL time.Duration
+	stopCh     chan struct{} // 用于停止 cleanupExpiredSessions goroutine
 
 	// Concurrency control
 	probeSem            *semaphore.Weighted
@@ -115,6 +116,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 		logger:     logger,
 		sessions:   make(map[string]*Session),
 		sessionTTL: 24 * time.Hour,
+		stopCh:     make(chan struct{}),
 		probeSem:            semaphore.NewWeighted(maxConcurrentProbes),
 		maxConcurrentProbes: maxConcurrentProbes,
 	}
@@ -224,6 +226,12 @@ func (s *Server) Start(ctx context.Context) {
 func (s *Server) Shutdown(ctx context.Context) {
 	if s == nil || s.srv == nil {
 		return
+	}
+	// 停止 cleanupExpiredSessions goroutine
+	select {
+	case <-s.stopCh:
+	default:
+		close(s.stopCh)
 	}
 	_ = s.srv.Shutdown(ctx)
 }
@@ -962,15 +970,20 @@ func (s *Server) cleanupExpiredSessions() {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		now := time.Now()
-		s.sessionMu.Lock()
-		for token, session := range s.sessions {
-			if now.After(session.ExpiresAt) {
-				delete(s.sessions, token)
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			s.sessionMu.Lock()
+			for token, session := range s.sessions {
+				if now.After(session.ExpiresAt) {
+					delete(s.sessions, token)
+				}
 			}
+			s.sessionMu.Unlock()
 		}
-		s.sessionMu.Unlock()
 	}
 }
 

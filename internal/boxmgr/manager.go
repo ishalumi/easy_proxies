@@ -195,6 +195,10 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 
 	// Reset shared state store to ensure clean state for new config
 	pool.ResetSharedStateStore()
+	// 清空 monitor 旧节点，释放对旧 outbound 的引用
+	if m.monitorMgr != nil {
+		m.monitorMgr.Reset()
+	}
 
 	// Create and start new box instance with automatic port conflict resolution
 	var instance *box.Box
