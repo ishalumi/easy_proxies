@@ -28,8 +28,9 @@ type Config struct {
 	SubscriptionRefresh SubscriptionRefreshConfig `yaml:"subscription_refresh"`
 	GeoIP               GeoIPConfig               `yaml:"geoip"`
 	Nodes               []NodeConfig              `yaml:"nodes"`
-	NodesFile           string                    `yaml:"nodes_file"`    // 节点文件路径，每行一个 URI
-	Subscriptions       []string                  `yaml:"subscriptions"` // 订阅链接列表
+	NodesFile           string                    `yaml:"nodes_file"`          // 节点文件路径，每行一个 URI
+	ExtraNodesFiles     []string                  `yaml:"extra_nodes_files"`   // 额外节点文件列表，不会被订阅覆盖
+	Subscriptions       []string                  `yaml:"subscriptions"`       // 订阅链接列表
 	ExternalIP          string                    `yaml:"external_ip"`      // 外部 IP 地址，用于导出时替换 0.0.0.0
 	LogLevel            string                    `yaml:"log_level"`
 	SkipCertVerify      bool                      `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
@@ -94,6 +95,7 @@ type NodeSource string
 const (
 	NodeSourceInline       NodeSource = "inline"       // Defined directly in config.yaml nodes array
 	NodeSourceFile         NodeSource = "nodes_file"   // Loaded from external nodes file
+	NodeSourceExtraFile    NodeSource = "extra_file"   // Loaded from extra_nodes_files
 	NodeSourceSubscription NodeSource = "subscription" // Fetched from subscription URL
 )
 
@@ -126,9 +128,16 @@ func Load(path string) (*Config, error) {
 	cfg.filePath = path
 
 	// Resolve nodes_file path relative to config file directory
+	configDir := filepath.Dir(path)
 	if cfg.NodesFile != "" && !filepath.IsAbs(cfg.NodesFile) {
-		configDir := filepath.Dir(path)
 		cfg.NodesFile = filepath.Join(configDir, cfg.NodesFile)
+	}
+
+	// Resolve extra_nodes_files paths relative to config file directory
+	for i, f := range cfg.ExtraNodesFiles {
+		if f != "" && !filepath.IsAbs(f) {
+			cfg.ExtraNodesFiles[i] = filepath.Join(configDir, f)
+		}
 	}
 
 	if err := cfg.normalize(); err != nil {
@@ -253,7 +262,7 @@ func (c *Config) normalize() error {
 
 	// Load nodes from file if specified (but NOT if subscriptions exist - subscription takes priority)
 	if c.NodesFile != "" && len(c.Subscriptions) == 0 {
-		fileNodes, err := loadNodesFromFile(c.NodesFile)
+		fileNodes, err := LoadNodesFromFile(c.NodesFile)
 		if err != nil {
 			return fmt.Errorf("load nodes from file %q: %w", c.NodesFile, err)
 		}
@@ -295,6 +304,20 @@ func (c *Config) normalize() error {
 			}
 		}
 		c.Nodes = append(c.Nodes, subNodes...)
+	}
+
+	// Load extra nodes from additional files (never overwritten by subscriptions)
+	for _, extraFile := range c.ExtraNodesFiles {
+		extraNodes, err := LoadNodesFromFile(extraFile)
+		if err != nil {
+			log.Printf("⚠️ Failed to load extra nodes from %q: %v (skipping)", extraFile, err)
+			continue
+		}
+		for idx := range extraNodes {
+			extraNodes[idx].Source = NodeSourceExtraFile
+		}
+		c.Nodes = append(c.Nodes, extraNodes...)
+		log.Printf("✅ Loaded %d extra nodes from %s", len(extraNodes), extraFile)
 	}
 
 	if len(c.Nodes) == 0 {
@@ -527,9 +550,9 @@ func (c *Config) ManagementEnabled() bool {
 	return *c.Management.Enabled
 }
 
-// loadNodesFromFile reads a nodes file where each line is a proxy URI
+// LoadNodesFromFile reads a nodes file where each line is a proxy URI
 // Lines starting with # are comments, empty lines are ignored
-func loadNodesFromFile(path string) ([]NodeConfig, error) {
+func LoadNodesFromFile(path string) ([]NodeConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

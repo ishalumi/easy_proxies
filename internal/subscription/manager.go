@@ -488,6 +488,20 @@ func (m *Manager) createNewConfig(nodes []config.NodeConfig) *config.Config {
 		}
 	}
 
+	// Merge extra nodes files (these are never overwritten by subscriptions)
+	for _, extraFile := range m.baseCfg.ExtraNodesFiles {
+		extraNodes, err := config.LoadNodesFromFile(extraFile)
+		if err != nil {
+			m.logger.Warnf("failed to load extra nodes from %q: %v (skipping)", extraFile, err)
+			continue
+		}
+		for idx := range extraNodes {
+			extraNodes[idx].Source = config.NodeSourceExtraFile
+		}
+		nodes = append(nodes, extraNodes...)
+		m.logger.Infof("loaded %d extra nodes from %s", len(extraNodes), extraFile)
+	}
+
 	newCfg.Nodes = nodes
 	return &newCfg
 }
