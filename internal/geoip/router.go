@@ -247,10 +247,12 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request, dialer Poo
 	outReq.Header.Del("Proxy-Connection")
 	outReq.Header.Del("Proxy-Authorization")
 
-	// Create transport with custom dialer
+	// 使用一次性 transport，禁用连接池防止泄露
 	transport := &http.Transport{
-		DialContext: dialer.DialContext,
+		DialContext:       dialer.DialContext,
+		DisableKeepAlives: true,
 	}
+	defer transport.CloseIdleConnections()
 
 	resp, err := transport.RoundTrip(outReq)
 	if err != nil {

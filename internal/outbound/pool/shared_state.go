@@ -19,21 +19,31 @@ type sharedMemberState struct {
 	active           atomic.Int32
 }
 
-var sharedStateStore sync.Map // map[tag]*sharedMemberState
+// sharedStateStorePtr 持有当前活跃的 sync.Map 指针，Reload 时通过原子替换整个 map 避免竞态
+var sharedStateStorePtr atomic.Pointer[sync.Map]
+
+func init() {
+	sharedStateStorePtr.Store(&sync.Map{})
+}
+
+func sharedStore() *sync.Map {
+	return sharedStateStorePtr.Load()
+}
 
 // acquireSharedState returns the shared state for a tag, creating if needed.
 func acquireSharedState(tag string) *sharedMemberState {
-	if v, ok := sharedStateStore.Load(tag); ok {
+	store := sharedStore()
+	if v, ok := store.Load(tag); ok {
 		return v.(*sharedMemberState)
 	}
 	state := &sharedMemberState{}
-	actual, _ := sharedStateStore.LoadOrStore(tag, state)
+	actual, _ := store.LoadOrStore(tag, state)
 	return actual.(*sharedMemberState)
 }
 
 // lookupSharedState returns the shared state if it exists.
 func lookupSharedState(tag string) (*sharedMemberState, bool) {
-	v, ok := sharedStateStore.Load(tag)
+	v, ok := sharedStore().Load(tag)
 	if !ok {
 		return nil, false
 	}
@@ -41,11 +51,9 @@ func lookupSharedState(tag string) (*sharedMemberState, bool) {
 }
 
 // ResetSharedStateStore clears all shared state (used during config reload).
+// 原子替换整个 map，旧 map 引用会随旧 goroutine 结束后被 GC
 func ResetSharedStateStore() {
-	sharedStateStore.Range(func(key, _ any) bool {
-		sharedStateStore.Delete(key)
-		return true
-	})
+	sharedStateStorePtr.Store(&sync.Map{})
 }
 
 func (s *sharedMemberState) attachEntry(entry *monitor.EntryHandle) {
