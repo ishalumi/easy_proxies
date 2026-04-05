@@ -569,7 +569,6 @@ func loadNodesFromSubscription(subURL string, timeout time.Duration) ([]NodeConf
 	client := &http.Client{
 		Timeout: timeout,
 	}
-	defer client.CloseIdleConnections()
 
 	req, err := http.NewRequest("GET", subURL, nil)
 	if err != nil {
