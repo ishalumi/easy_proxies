@@ -12,6 +12,7 @@ import (
 	"log"
 	mathrand "math/rand"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"runtime"
 	"strings"
@@ -138,6 +139,17 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/subscription/status", s.withAuth(s.handleSubscriptionStatus))
 	mux.HandleFunc("/api/subscription/refresh", s.withAuth(s.handleSubscriptionRefresh))
 	mux.HandleFunc("/api/reload", s.withAuth(s.handleReload))
+
+	// pprof 端点，用于运行时内存诊断
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+
 	s.srv = &http.Server{Addr: cfg.Listen, Handler: mux}
 	return s
 }
