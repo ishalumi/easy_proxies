@@ -268,8 +268,10 @@ func Build(cfg *config.Config) (option.Options, error) {
 			outbounds = append(outbounds, perPool)
 			inboundOptions := &option.HTTPMixedInboundOptions{
 				ListenOptions: option.ListenOptions{
-					Listen:     addr,
-					ListenPort: meta.Port,
+					Listen:               addr,
+					ListenPort:           meta.Port,
+					TCPKeepAlive:         badoption.Duration(30 * time.Second),
+					TCPKeepAliveInterval: badoption.Duration(15 * time.Second),
 				},
 			}
 			username := cfg.MultiPort.Username
@@ -361,8 +363,10 @@ func buildPoolInbound(cfg *config.Config) (option.Inbound, error) {
 	}
 	inboundOptions := &option.HTTPMixedInboundOptions{
 		ListenOptions: option.ListenOptions{
-			Listen:     listenAddr,
-			ListenPort: cfg.Listener.Port,
+			Listen:               listenAddr,
+			ListenPort:           cfg.Listener.Port,
+			TCPKeepAlive:         badoption.Duration(30 * time.Second),
+			TCPKeepAliveInterval: badoption.Duration(15 * time.Second),
 		},
 	}
 	if cfg.Listener.Username != "" {
