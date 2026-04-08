@@ -350,6 +350,11 @@ func Build(cfg *config.Config) (option.Options, error) {
 		Inbounds:  inbounds,
 		Outbounds: outbounds,
 		Route:     &route,
+		Experimental: &option.ExperimentalOptions{
+			ClashAPI: &option.ClashAPIOptions{
+				ExternalController: "127.0.0.1:9092",
+			},
+		},
 	}
 	return opts, nil
 }
@@ -409,6 +414,18 @@ func buildNodeOutbound(tag, rawURI string, skipCertVerify bool) (option.Outbound
 			return option.Outbound{}, err
 		}
 		return option.Outbound{Type: C.TypeTrojan, Tag: tag, Options: &opts}, nil
+	case "anytls":
+		opts, err := buildAnyTLSOptions(parsed, skipCertVerify)
+		if err != nil {
+			return option.Outbound{}, err
+		}
+		return option.Outbound{Type: C.TypeAnyTLS, Tag: tag, Options: &opts}, nil
+	case "tuic":
+		opts, err := buildTUICOptions(parsed, skipCertVerify)
+		if err != nil {
+			return option.Outbound{}, err
+		}
+		return option.Outbound{Type: C.TypeTUIC, Tag: tag, Options: &opts}, nil
 	case "vmess":
 		opts, err := buildVMessOptions(rawURI, skipCertVerify)
 		if err != nil {
@@ -709,6 +726,92 @@ func buildTrojanOptions(u *url.URL, skipCertVerify bool) (option.TrojanOutboundO
 	} else if transport != nil {
 		opts.Transport = transport
 	}
+
+	return opts, nil
+}
+
+func buildAnyTLSOptions(u *url.URL, skipCertVerify bool) (option.AnyTLSOutboundOptions, error) {
+	password := u.User.Username()
+	if password == "" {
+		password, _ = u.User.Password()
+	}
+
+	server, port, err := hostPort(u, 443)
+	if err != nil {
+		return option.AnyTLSOutboundOptions{}, err
+	}
+
+	query := u.Query()
+	opts := option.AnyTLSOutboundOptions{
+		ServerOptions: option.ServerOptions{Server: server, ServerPort: uint16(port)},
+		Password:      password,
+	}
+
+	// Parse TLS options
+	if tlsOptions, err := buildTLSOptions(query, skipCertVerify); err != nil {
+		return option.AnyTLSOutboundOptions{}, err
+	} else if tlsOptions != nil {
+		opts.OutboundTLSOptionsContainer = option.OutboundTLSOptionsContainer{TLS: tlsOptions}
+	} else {
+		// AnyTLS defaults to TLS enabled
+		opts.OutboundTLSOptionsContainer = option.OutboundTLSOptionsContainer{
+			TLS: &option.OutboundTLSOptions{
+				Enabled:    true,
+				ServerName: server,
+				Insecure:   skipCertVerify,
+			},
+		}
+	}
+
+	return opts, nil
+}
+
+func buildTUICOptions(u *url.URL, skipCertVerify bool) (option.TUICOutboundOptions, error) {
+	uuid := u.User.Username()
+	password, _ := u.User.Password()
+
+	server, port, err := hostPort(u, 443)
+	if err != nil {
+		return option.TUICOutboundOptions{}, err
+	}
+
+	query := u.Query()
+	opts := option.TUICOutboundOptions{
+		ServerOptions: option.ServerOptions{Server: server, ServerPort: uint16(port)},
+		UUID:          uuid,
+		Password:      password,
+	}
+
+	// Congestion control (bbr, cubic, new_reno)
+	if cc := query.Get("congestion_control"); cc != "" {
+		opts.CongestionControl = cc
+	}
+
+	// UDP relay mode (native, quic)
+	if udpMode := query.Get("udp_relay_mode"); udpMode != "" {
+		opts.UDPRelayMode = udpMode
+	}
+
+	// TLS options (TUIC always uses TLS)
+	tlsOptions := &option.OutboundTLSOptions{
+		Enabled:    true,
+		ServerName: server,
+		Insecure:   skipCertVerify,
+	}
+	if sni := query.Get("sni"); sni != "" {
+		tlsOptions.ServerName = sni
+	}
+	insecure := query.Get("allowInsecure")
+	if insecure == "" {
+		insecure = query.Get("insecure")
+	}
+	if insecure != "" {
+		tlsOptions.Insecure = insecure == "1" || strings.EqualFold(insecure, "true")
+	}
+	if alpn := query.Get("alpn"); alpn != "" {
+		tlsOptions.ALPN = badoption.Listable[string](strings.Split(alpn, ","))
+	}
+	opts.OutboundTLSOptionsContainer = option.OutboundTLSOptionsContainer{TLS: tlsOptions}
 
 	return opts, nil
 }

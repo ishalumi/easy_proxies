@@ -2,6 +2,8 @@ package geoip
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"context"
 	"fmt"
 	"io"
@@ -488,40 +490,92 @@ func (l *Lookup) LookupURI(uri string) RegionInfo {
 
 // extractHostFromURI extracts the host/IP from various proxy URI formats
 func extractHostFromURI(uri string) string {
-	// Handle different URI schemes
 	lowerURI := strings.ToLower(uri)
 
-	// Standard URL-parseable schemes (ss:// and ssr:// handled separately below)
-	if strings.HasPrefix(lowerURI, "vmess://") ||
-		strings.HasPrefix(lowerURI, "vless://") ||
-		strings.HasPrefix(lowerURI, "trojan://") ||
-		strings.HasPrefix(lowerURI, "hysteria://") ||
-		strings.HasPrefix(lowerURI, "hysteria2://") ||
-		strings.HasPrefix(lowerURI, "hy2://") ||
-		strings.HasPrefix(lowerURI, "socks5://") ||
-		strings.HasPrefix(lowerURI, "socks://") ||
-		strings.HasPrefix(lowerURI, "http://") ||
-		strings.HasPrefix(lowerURI, "https://") {
-		// Standard URL format: scheme://user@host:port?params#fragment
-		parsed, err := url.Parse(uri)
-		if err != nil {
-			return ""
-		}
-		return parsed.Hostname()
+	// VMess: typically base64-encoded JSON — must be handled specially
+	if strings.HasPrefix(lowerURI, "vmess://") {
+		return extractVMessHost(uri)
 	}
 
+	// Shadowsocks: ss://base64(method:password)@host:port#name
 	if strings.HasPrefix(lowerURI, "ss://") {
-		// Shadowsocks format: ss://base64(method:password)@host:port#name
-		// or ss://base64@host:port#name
 		return extractSSHost(uri)
 	}
 
+	// SSR: base64 encoded
 	if strings.HasPrefix(lowerURI, "ssr://") {
-		// SSR format is base64 encoded
 		return extractSSRHost(uri)
 	}
 
-	return ""
+	// All other standard URL-parseable schemes
+	standardSchemes := []string{
+		"vless://", "trojan://",
+		"hysteria://", "hysteria2://", "hy2://",
+		"anytls://", "tuic://",
+		"socks5://", "socks://",
+		"http://", "https://",
+	}
+	for _, scheme := range standardSchemes {
+		if strings.HasPrefix(lowerURI, scheme) {
+			parsed, err := url.Parse(uri)
+			if err != nil {
+				return ""
+			}
+			return parsed.Hostname()
+		}
+	}
+
+	// Fallback: try url.Parse for any unknown scheme
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
+// extractVMessHost extracts the server address from a vmess:// URI.
+// VMess URIs come in two formats:
+//  1. Base64 JSON: vmess://base64({"add":"1.2.3.4", ...})
+//  2. URL format:  vmess://uuid@host:port?...
+func extractVMessHost(uri string) string {
+	// Strip scheme (case-insensitive)
+	idx := strings.Index(uri, "://")
+	if idx < 0 {
+		return ""
+	}
+	encoded := uri[idx+3:]
+	if encoded == "" {
+		return ""
+	}
+
+	// Strip fragment (#name) if present — it breaks base64 decode
+	if hashIdx := strings.Index(encoded, "#"); hashIdx >= 0 {
+		encoded = encoded[:hashIdx]
+	}
+
+	// Try base64 JSON format first (most common)
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(encoded)
+	}
+	if err != nil {
+		decoded, err = base64.RawURLEncoding.DecodeString(encoded)
+	}
+	if err == nil && len(decoded) > 0 {
+		var obj struct {
+			Add string `json:"add"`
+		}
+		if json.Unmarshal(decoded, &obj) == nil && obj.Add != "" {
+			return obj.Add
+		}
+	}
+
+	// Fallback: try URL format vmess://uuid@host:port?...
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
 
 func extractSSHost(uri string) string {

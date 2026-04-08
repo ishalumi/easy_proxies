@@ -9,7 +9,7 @@ It focuses on turning many upstream nodes into one stable local HTTP/SOCKS5 prox
 ## What It Does
 
 - Supports `pool`, `multi-port`, and `hybrid` runtime modes.
-- Builds upstream outbounds for: `vmess`, `vless`, `trojan`, `ss`/`shadowsocks`, `hysteria2`/`hy2`, `socks5`/`socks`, `http`/`https`.
+- Builds upstream outbounds for: `vmess`, `vless`, `trojan`, `ss`/`shadowsocks`, `hysteria2`/`hy2`, `socks5`/`socks`, `http`/`https`, `anytls`, `tuic`.
 - Supports node sources:
   - inline `nodes:` in `config.yaml`
   - `nodes_file` (one URI per line)
@@ -20,8 +20,10 @@ It focuses on turning many upstream nodes into one stable local HTTP/SOCKS5 prox
   - settings update (`external_ip`, `probe_target`, `skip_cert_verify`)
   - config node CRUD + reload
   - subscription status + manual refresh
+  - **real-time log console** (last 1000 lines, WebSocket streaming)
 - Adds configurable DNS resolver for outbound domain resolution (important for VMess nodes with domain hosts).
 - Optional GeoIP labeling with auto-update and hot-reload (region/country metadata in dashboard, pool mode only).
+- **Configurable log rotation** with size limits, backup count, and compression.
 
 ## Quick Start
 
@@ -129,6 +131,8 @@ Runtime builder supports:
 - `hysteria2` / `hy2`
 - `socks5` / `socks`
 - `http` / `https`
+- `anytls`
+- `tuic`
 
 Parser may recognize additional URI prefixes in subscription text (for compatibility), but unsupported schemes are skipped during build.
 
@@ -154,6 +158,11 @@ When `management.password` is empty, API/UI auth is bypassed.
 - Reload (`/api/reload` or subscription refresh) interrupts active connections.
 - Settings API persists values to `config.yaml`; some changes require reload to fully take effect.
 - Default normalization values (when omitted) are in `internal/config/config.go`.
+- Log rotation is configured via the `log` section; when `output: file`, logs are written to both console and file with automatic rotation.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
 
 ## Development
 

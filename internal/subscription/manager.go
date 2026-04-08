@@ -126,6 +126,48 @@ func (m *Manager) Stop() {
 	}
 }
 
+// UpdateConfig hot-reloads subscription URLs and refresh settings without restart.
+func (m *Manager) UpdateConfig(urls []string, enabled bool, interval time.Duration) {
+	m.mu.Lock()
+	m.baseCfg.Subscriptions = urls
+	m.baseCfg.SubscriptionRefresh.Enabled = enabled
+	if interval > 0 {
+		m.baseCfg.SubscriptionRefresh.Interval = interval
+	}
+	m.mu.Unlock()
+
+	// Persist to config.yaml
+	if err := m.baseCfg.SaveSettings(); err != nil {
+		m.logger.Errorf("failed to save subscription config: %v", err)
+	}
+
+	// Restart the refresh loop with new settings
+	if m.cancel != nil {
+		m.cancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.mu.Lock()
+	m.ctx = ctx
+	m.cancel = cancel
+	m.manualRefresh = make(chan struct{}, 1)
+	m.mu.Unlock()
+
+	if enabled && len(urls) > 0 {
+		m.logger.Infof("subscription config updated: %d URLs, interval=%s, restarting loop", len(urls), m.baseCfg.SubscriptionRefresh.Interval)
+		go m.refreshLoop(m.baseCfg.SubscriptionRefresh.Interval)
+
+		// Trigger an immediate refresh so the new URLs take effect right away
+		select {
+		case m.manualRefresh <- struct{}{}:
+			m.logger.Infof("triggered immediate refresh after config update")
+		default:
+			// A refresh is already pending
+		}
+	} else {
+		m.logger.Infof("subscription disabled or no URLs configured")
+	}
+}
+
 // RefreshNow triggers an immediate refresh.
 func (m *Manager) RefreshNow() error {
 	select {
@@ -429,7 +471,7 @@ func (m *Manager) fetchSubscription(subURL string, timeout time.Duration) ([]con
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("User-Agent", "clash-verge/v2.2.3")
 	req.Header.Set("Accept", "*/*")
 
 	// Use custom HTTP client with connection pooling

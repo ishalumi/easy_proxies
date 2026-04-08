@@ -27,6 +27,7 @@ type Config struct {
 	Management          ManagementConfig          `yaml:"management"`
 	SubscriptionRefresh SubscriptionRefreshConfig `yaml:"subscription_refresh"`
 	GeoIP               GeoIPConfig               `yaml:"geoip"`
+	Log                 LogConfig                 `yaml:"log"`
 	Nodes               []NodeConfig              `yaml:"nodes"`
 	NodesFile           string                    `yaml:"nodes_file"`    // 节点文件路径，每行一个 URI
 	Subscriptions       []string                  `yaml:"subscriptions"` // 订阅链接列表
@@ -35,6 +36,16 @@ type Config struct {
 	SkipCertVerify      bool                      `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
 
 	filePath string `yaml:"-"` // 配置文件路径，用于保存
+}
+
+// LogConfig controls log output and rotation.
+type LogConfig struct {
+	Output     string `yaml:"output"`      // 日志输出: "stdout", "file", 默认 "stdout"
+	File       string `yaml:"file"`        // 日志文件路径，默认 "logs/easy_proxies.log"
+	MaxSize    int    `yaml:"max_size"`    // 单个日志文件最大 MB，默认 50
+	MaxBackups int    `yaml:"max_backups"` // 保留旧日志文件个数，默认 3
+	MaxAge     int    `yaml:"max_age"`     // 保留旧日志文件天数，默认 7
+	Compress   bool   `yaml:"compress"`    // 是否压缩旧日志，默认 false
 }
 
 // GeoIPConfig controls GeoIP-based region routing.
@@ -345,6 +356,9 @@ func (c *Config) normalize() error {
 		c.LogLevel = "info"
 	}
 
+	// Log config defaults
+	c.normalizeLogConfig()
+
 	// Auto-fix port conflicts in hybrid mode (pool port vs multi-port)
 	if c.Mode == "hybrid" {
 		poolPort := c.Listener.Port
@@ -516,7 +530,32 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 		c.LogLevel = "info"
 	}
 
+	c.normalizeLogConfig()
+
 	return nil
+}
+
+// normalizeLogConfig applies defaults to the log config.
+func (c *Config) normalizeLogConfig() {
+	if c.Log.Output == "" {
+		c.Log.Output = "stdout"
+	}
+	if c.Log.File == "" {
+		c.Log.File = "logs/easy_proxies.log"
+	}
+	// Resolve relative log file path against config dir
+	if c.filePath != "" && !filepath.IsAbs(c.Log.File) {
+		c.Log.File = filepath.Join(filepath.Dir(c.filePath), c.Log.File)
+	}
+	if c.Log.MaxSize <= 0 {
+		c.Log.MaxSize = 50
+	}
+	if c.Log.MaxBackups <= 0 {
+		c.Log.MaxBackups = 3
+	}
+	if c.Log.MaxAge <= 0 {
+		c.Log.MaxAge = 7
+	}
 }
 
 // ManagementEnabled reports whether the monitoring endpoint should run.
@@ -552,8 +591,10 @@ func loadNodesFromSubscription(subURL string, timeout time.Duration) ([]NodeConf
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	// Set common headers to avoid being blocked
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	// Use clash-compatible User-Agent to get Clash YAML format from subscription servers
+	// This ensures we receive structured YAML with all proxy types (AnyTLS, TUIC, etc.)
+	// instead of base64-encoded content that may only contain basic SS nodes
+	req.Header.Set("User-Agent", "clash-verge/v2.2.3")
 	req.Header.Set("Accept", "*/*")
 
 	resp, err := client.Do(req)
@@ -581,8 +622,8 @@ func loadNodesFromSubscription(subURL string, timeout time.Duration) ([]NodeConf
 func parseSubscriptionContent(content string) ([]NodeConfig, error) {
 	content = strings.TrimSpace(content)
 
-	// Quick check for YAML format (check first 200 chars for "proxies:")
-	sampleSize := 200
+	// Quick check for YAML format (check first 16384 chars for "proxies:")
+	sampleSize := 16384
 	if len(content) < sampleSize {
 		sampleSize = len(content)
 	}
@@ -670,7 +711,7 @@ func isBase64(s string) bool {
 
 // IsProxyURI checks if a string is a valid proxy URI
 func IsProxyURI(s string) bool {
-	schemes := []string{"vmess://", "vless://", "trojan://", "ss://", "ssr://", "hysteria://", "hysteria2://", "hy2://", "socks5://", "socks://", "http://", "https://"}
+	schemes := []string{"vmess://", "vless://", "trojan://", "ss://", "ssr://", "hysteria://", "hysteria2://", "hy2://", "tuic://", "socks5://", "socks://", "http://", "https://", "anytls://"}
 	lower := strings.ToLower(s)
 	for _, scheme := range schemes {
 		if strings.HasPrefix(lower, scheme) {
@@ -686,27 +727,31 @@ type clashConfig struct {
 }
 
 type clashProxy struct {
-	Name           string                 `yaml:"name"`
-	Type           string                 `yaml:"type"`
-	Server         string                 `yaml:"server"`
-	Port           int                    `yaml:"port"`
-	UUID           string                 `yaml:"uuid"`
-	Password       string                 `yaml:"password"`
-	Cipher         string                 `yaml:"cipher"`
-	AlterId        int                    `yaml:"alterId"`
-	Network        string                 `yaml:"network"`
-	TLS            bool                   `yaml:"tls"`
-	SkipCertVerify bool                   `yaml:"skip-cert-verify"`
-	ServerName     string                 `yaml:"servername"`
-	SNI            string                 `yaml:"sni"`
-	Flow           string                 `yaml:"flow"`
-	UDP            bool                   `yaml:"udp"`
-	WSOpts         *clashWSOptions        `yaml:"ws-opts"`
-	GrpcOpts       *clashGrpcOptions      `yaml:"grpc-opts"`
-	RealityOpts    *clashRealityOptions   `yaml:"reality-opts"`
-	ClientFingerprint string              `yaml:"client-fingerprint"`
-	Plugin         string                 `yaml:"plugin"`
-	PluginOpts     map[string]interface{} `yaml:"plugin-opts"`
+	Name              string                 `yaml:"name"`
+	Type              string                 `yaml:"type"`
+	Server            string                 `yaml:"server"`
+	Port              int                    `yaml:"port"`
+	UUID              string                 `yaml:"uuid"`
+	Password          string                 `yaml:"password"`
+	Cipher            string                 `yaml:"cipher"`
+	AlterId           int                    `yaml:"alterId"`
+	Network           string                 `yaml:"network"`
+	TLS               bool                   `yaml:"tls"`
+	SkipCertVerify    bool                   `yaml:"skip-cert-verify"`
+	ServerName        string                 `yaml:"servername"`
+	SNI               string                 `yaml:"sni"`
+	Flow              string                 `yaml:"flow"`
+	UDP               bool                   `yaml:"udp"`
+	WSOpts            *clashWSOptions        `yaml:"ws-opts"`
+	GrpcOpts          *clashGrpcOptions      `yaml:"grpc-opts"`
+	RealityOpts       *clashRealityOptions   `yaml:"reality-opts"`
+	ClientFingerprint string                 `yaml:"client-fingerprint"`
+	Plugin            string                 `yaml:"plugin"`
+	PluginOpts        map[string]interface{} `yaml:"plugin-opts"`
+	// TUIC-specific fields
+	ALPN                []string `yaml:"alpn"`
+	CongestionController string  `yaml:"congestion-controller"`
+	UDPRelayMode        string   `yaml:"udp-relay-mode"`
 }
 
 type clashWSOptions struct {
@@ -753,10 +798,14 @@ func convertClashProxyToURI(p clashProxy) string {
 		return buildVLESSURI(p)
 	case "trojan":
 		return buildTrojanURI(p)
+	case "anytls":
+		return buildAnyTLSURI(p)
 	case "ss", "shadowsocks":
 		return buildShadowsocksURI(p)
 	case "hysteria2", "hy2":
 		return buildHysteria2URI(p)
+	case "tuic":
+		return buildTUICURI(p)
 	default:
 		return ""
 	}
@@ -845,9 +894,6 @@ func buildVLESSURI(p clashProxy) string {
 
 func buildTrojanURI(p clashProxy) string {
 	params := url.Values{}
-	if p.Network != "" && p.Network != "tcp" {
-		params.Set("type", p.Network)
-	}
 	if p.ServerName != "" {
 		params.Set("sni", p.ServerName)
 	} else if p.SNI != "" {
@@ -855,6 +901,9 @@ func buildTrojanURI(p clashProxy) string {
 	}
 	if p.SkipCertVerify {
 		params.Set("allowInsecure", "1")
+	}
+	if p.Network != "" && p.Network != "tcp" {
+		params.Set("type", p.Network)
 	}
 	if p.WSOpts != nil {
 		if p.WSOpts.Path != "" {
@@ -874,6 +923,28 @@ func buildTrojanURI(p clashProxy) string {
 	}
 
 	return fmt.Sprintf("trojan://%s@%s:%d%s#%s", p.Password, p.Server, p.Port, query, url.QueryEscape(p.Name))
+}
+
+func buildAnyTLSURI(p clashProxy) string {
+	params := url.Values{}
+	if p.ServerName != "" {
+		params.Set("sni", p.ServerName)
+	} else if p.SNI != "" {
+		params.Set("sni", p.SNI)
+	}
+	if p.SkipCertVerify {
+		params.Set("allowInsecure", "1")
+	}
+	if p.ClientFingerprint != "" {
+		params.Set("fp", p.ClientFingerprint)
+	}
+
+	query := ""
+	if len(params) > 0 {
+		query = "?" + params.Encode()
+	}
+
+	return fmt.Sprintf("anytls://%s@%s:%d%s#%s", p.Password, p.Server, p.Port, query, url.QueryEscape(p.Name))
 }
 
 func buildShadowsocksURI(p clashProxy) string {
@@ -899,6 +970,35 @@ func buildHysteria2URI(p clashProxy) string {
 	}
 
 	return fmt.Sprintf("hysteria2://%s@%s:%d%s#%s", p.Password, p.Server, p.Port, query, url.QueryEscape(p.Name))
+}
+
+func buildTUICURI(p clashProxy) string {
+	params := url.Values{}
+	if p.ServerName != "" {
+		params.Set("sni", p.ServerName)
+	} else if p.SNI != "" {
+		params.Set("sni", p.SNI)
+	}
+	if p.SkipCertVerify {
+		params.Set("allowInsecure", "1")
+	}
+	if p.CongestionController != "" {
+		params.Set("congestion_control", p.CongestionController)
+	}
+	if p.UDPRelayMode != "" {
+		params.Set("udp_relay_mode", p.UDPRelayMode)
+	}
+	if len(p.ALPN) > 0 {
+		params.Set("alpn", strings.Join(p.ALPN, ","))
+	}
+
+	query := ""
+	if len(params) > 0 {
+		query = "?" + params.Encode()
+	}
+
+	// TUIC URI format: tuic://uuid:password@server:port?params#name
+	return fmt.Sprintf("tuic://%s:%s@%s:%d%s#%s", p.UUID, p.Password, p.Server, p.Port, query, url.QueryEscape(p.Name))
 }
 
 // FilePath returns the config file path.
@@ -1032,6 +1132,9 @@ func (c *Config) SaveSettings() error {
 	saveCfg.ExternalIP = c.ExternalIP
 	saveCfg.Management.ProbeTarget = c.Management.ProbeTarget
 	saveCfg.SkipCertVerify = c.SkipCertVerify
+	saveCfg.Log = c.Log
+	saveCfg.Subscriptions = c.Subscriptions
+	saveCfg.SubscriptionRefresh = c.SubscriptionRefresh
 
 	newData, err := yaml.Marshal(&saveCfg)
 	if err != nil {

@@ -17,7 +17,9 @@ import (
 	"easy_proxies/internal/outbound/pool"
 
 	"github.com/sagernet/sing-box"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/include"
+	"github.com/sagernet/sing-box/option"
 )
 
 // Ensure Manager implements monitor.NodeManager.
@@ -309,7 +311,7 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		return nil, fmt.Errorf("build sing-box options: %w", err)
 	}
 
-	const maxRetries = 200 // Increased to handle large subscription sources with many invalid nodes
+	maxRetries := len(cfg.Nodes)*3 + 50 // Dynamically scale retries to configuration size
 	outboundErrRe := regexp.MustCompile(`initialize outbound\[(\d+)\]`)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -348,14 +350,50 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		// Remove the offending outbound
 		opts.Outbounds = append(opts.Outbounds[:idx], opts.Outbounds[idx+1:]...)
 
-		// Also remove the tag from any pool outbound's member list
-		for i := range opts.Outbounds {
-			if opts.Outbounds[i].Type == pool.Type {
-				if poolOpts, ok := opts.Outbounds[i].Options.(*pool.Options); ok {
+		// Clean up pool outbounds that contained this tag
+		var newOutbounds []option.Outbound
+		var removedPoolTags []string
+		for _, ob := range opts.Outbounds {
+			if ob.Type == pool.Type {
+				if poolOpts, ok := ob.Options.(*pool.Options); ok {
 					poolOpts.Members = removeFromSlice(poolOpts.Members, badTag)
 					delete(poolOpts.Metadata, badTag)
+					
+					// If the pool is now empty, remove it to avoid another validation error
+					if len(poolOpts.Members) == 0 {
+						log.Printf("⚠️  Removing empty pool '%s'", ob.Tag)
+						removedPoolTags = append(removedPoolTags, ob.Tag)
+						continue // skip adding this empty pool
+					}
 				}
 			}
+			newOutbounds = append(newOutbounds, ob)
+		}
+		opts.Outbounds = newOutbounds
+
+		// Also remove any routes that pointed to the removed pools or the badTag
+		if (len(removedPoolTags) > 0 || badTag != "") && opts.Route != nil {
+			removedSet := make(map[string]bool)
+			for _, t := range removedPoolTags {
+				removedSet[t] = true
+			}
+			removedSet[badTag] = true
+
+			var newRules []option.Rule
+			for _, r := range opts.Route.Rules {
+				// We expect DefaultRules in our builder
+				if r.Type == C.RuleTypeDefault {
+					outboundTarget := r.DefaultOptions.RuleAction.RouteOptions.Outbound
+					if !removedSet[outboundTarget] {
+						newRules = append(newRules, r)
+					} else {
+						// Remove this rule since it points to a deleted outbound
+					}
+				} else {
+					newRules = append(newRules, r)
+				}
+			}
+			opts.Route.Rules = newRules
 		}
 	}
 

@@ -52,6 +52,7 @@ var (
 type SubscriptionRefresher interface {
 	RefreshNow() error
 	Status() SubscriptionStatus
+	UpdateConfig(urls []string, enabled bool, interval time.Duration)
 }
 
 // SubscriptionStatus represents subscription refresh status.
@@ -126,7 +127,10 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/export", s.withAuth(s.handleExport))
 	mux.HandleFunc("/api/subscription/status", s.withAuth(s.handleSubscriptionStatus))
 	mux.HandleFunc("/api/subscription/refresh", s.withAuth(s.handleSubscriptionRefresh))
+	mux.HandleFunc("/api/subscription/config", s.withAuth(s.handleSubscriptionConfig))
 	mux.HandleFunc("/api/reload", s.withAuth(s.handleReload))
+	mux.HandleFunc("/api/traffic", s.withAuth(s.handleTraffic))
+	mux.HandleFunc("/api/logs", s.withAuth(s.handleLogs))
 	s.srv = &http.Server{Addr: cfg.Listen, Handler: mux}
 	return s
 }
@@ -161,14 +165,18 @@ func (s *Server) SetConfig(cfg *config.Config) {
 }
 
 // getSettings returns current dynamic settings (thread-safe).
-func (s *Server) getSettings() (externalIP, probeTarget string, skipCertVerify bool) {
+func (s *Server) getSettings() (externalIP, probeTarget string, skipCertVerify bool, logCfg config.LogConfig) {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
-	return s.cfg.ExternalIP, s.cfg.ProbeTarget, s.cfg.SkipCertVerify
+	logCfg = config.LogConfig{}
+	if s.cfgSrc != nil {
+		logCfg = s.cfgSrc.Log
+	}
+	return s.cfg.ExternalIP, s.cfg.ProbeTarget, s.cfg.SkipCertVerify, logCfg
 }
 
 // updateSettings updates dynamic settings and persists to config file.
-func (s *Server) updateSettings(externalIP, probeTarget string, skipCertVerify bool) error {
+func (s *Server) updateSettings(externalIP, probeTarget string, skipCertVerify bool, logCfg *config.LogConfig) error {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
@@ -183,6 +191,20 @@ func (s *Server) updateSettings(externalIP, probeTarget string, skipCertVerify b
 	s.cfgSrc.ExternalIP = externalIP
 	s.cfgSrc.Management.ProbeTarget = probeTarget
 	s.cfgSrc.SkipCertVerify = skipCertVerify
+
+	if logCfg != nil {
+		s.cfgSrc.Log.Output = logCfg.Output
+		if logCfg.MaxSize > 0 {
+			s.cfgSrc.Log.MaxSize = logCfg.MaxSize
+		}
+		if logCfg.MaxBackups > 0 {
+			s.cfgSrc.Log.MaxBackups = logCfg.MaxBackups
+		}
+		if logCfg.MaxAge > 0 {
+			s.cfgSrc.Log.MaxAge = logCfg.MaxAge
+		}
+		s.cfgSrc.Log.Compress = logCfg.Compress
+	}
 
 	if err := s.cfgSrc.SaveSettings(); err != nil {
 		return fmt.Errorf("保存配置失败: %w", err)
@@ -614,7 +636,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		// 在 pool 模式下，所有节点共享同一端口，也正常导出
 		listenAddr := snap.ListenAddress
 		if listenAddr == "0.0.0.0" || listenAddr == "::" {
-			if extIP, _, _ := s.getSettings(); extIP != "" {
+			if extIP, _, _, _ := s.getSettings(); extIP != "" {
 				listenAddr = extIP
 			}
 		}
@@ -648,21 +670,36 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(strings.Join(lines, "\n")))
 }
 
-// handleSettings handles GET/PUT for dynamic settings (external_ip, probe_target, skip_cert_verify).
+// handleSettings handles GET/PUT for dynamic settings (external_ip, probe_target, skip_cert_verify, log).
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		extIP, probeTarget, skipCertVerify := s.getSettings()
+		extIP, probeTarget, skipCertVerify, logCfg := s.getSettings()
 		writeJSON(w, map[string]any{
 			"external_ip":      extIP,
 			"probe_target":     probeTarget,
 			"skip_cert_verify": skipCertVerify,
+			"log": map[string]any{
+				"output":      logCfg.Output,
+				"file":        logCfg.File,
+				"max_size":    logCfg.MaxSize,
+				"max_backups": logCfg.MaxBackups,
+				"max_age":     logCfg.MaxAge,
+				"compress":    logCfg.Compress,
+			},
 		})
 	case http.MethodPut:
 		var req struct {
 			ExternalIP     string `json:"external_ip"`
 			ProbeTarget    string `json:"probe_target"`
 			SkipCertVerify bool   `json:"skip_cert_verify"`
+			Log            *struct {
+				Output     string `json:"output"`
+				MaxSize    int    `json:"max_size"`
+				MaxBackups int    `json:"max_backups"`
+				MaxAge     int    `json:"max_age"`
+				Compress   bool   `json:"compress"`
+			} `json:"log"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -673,7 +710,18 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		extIP := strings.TrimSpace(req.ExternalIP)
 		probeTarget := strings.TrimSpace(req.ProbeTarget)
 
-		if err := s.updateSettings(extIP, probeTarget, req.SkipCertVerify); err != nil {
+		var logCfg *config.LogConfig
+		if req.Log != nil {
+			logCfg = &config.LogConfig{
+				Output:     req.Log.Output,
+				MaxSize:    req.Log.MaxSize,
+				MaxBackups: req.Log.MaxBackups,
+				MaxAge:     req.Log.MaxAge,
+				Compress:   req.Log.Compress,
+			}
+		}
+
+		if err := s.updateSettings(extIP, probeTarget, req.SkipCertVerify, logCfg); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			writeJSON(w, map[string]any{"error": err.Error()})
 			return
@@ -743,6 +791,79 @@ func (s *Server) handleSubscriptionRefresh(w http.ResponseWriter, r *http.Reques
 		"message":    "刷新成功",
 		"node_count": status.NodeCount,
 	})
+}
+
+// handleSubscriptionConfig handles GET/PUT for subscription configuration.
+func (s *Server) handleSubscriptionConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.cfgMu.RLock()
+		var urls []string
+		var enabled bool
+		var interval string
+		if s.cfgSrc != nil {
+			urls = s.cfgSrc.Subscriptions
+			enabled = s.cfgSrc.SubscriptionRefresh.Enabled
+			interval = s.cfgSrc.SubscriptionRefresh.Interval.String()
+		}
+		s.cfgMu.RUnlock()
+		writeJSON(w, map[string]any{
+			"subscriptions": urls,
+			"enabled":       enabled,
+			"interval":      interval,
+		})
+
+	case http.MethodPut:
+		var req struct {
+			Subscriptions []string `json:"subscriptions"`
+			Enabled       bool     `json:"enabled"`
+			Interval      string   `json:"interval"` // e.g. "1h", "30m"
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "请求格式错误"})
+			return
+		}
+
+		// Parse interval
+		interval, err := time.ParseDuration(req.Interval)
+		if err != nil || interval < 5*time.Minute {
+			interval = 1 * time.Hour // default
+		}
+
+		// Clean URLs
+		var cleanURLs []string
+		for _, u := range req.Subscriptions {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				cleanURLs = append(cleanURLs, u)
+			}
+		}
+
+		// Update in-memory config
+		s.cfgMu.Lock()
+		if s.cfgSrc != nil {
+			s.cfgSrc.Subscriptions = cleanURLs
+			s.cfgSrc.SubscriptionRefresh.Enabled = req.Enabled
+			s.cfgSrc.SubscriptionRefresh.Interval = interval
+		}
+		s.cfgMu.Unlock()
+
+		// Hot-reload subscription manager
+		if s.subRefresher != nil {
+			s.subRefresher.UpdateConfig(cleanURLs, req.Enabled, interval)
+		}
+
+		writeJSON(w, map[string]any{
+			"message":       "订阅配置已更新并生效",
+			"subscriptions": cleanURLs,
+			"enabled":       req.Enabled,
+			"interval":      interval.String(),
+		})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
 // nodePayload is the JSON request body for node CRUD operations.
@@ -873,6 +994,62 @@ func (s *Server) respondNodeError(w http.ResponseWriter, err error) {
 	}
 	w.WriteHeader(status)
 	writeJSON(w, map[string]any{"error": err.Error()})
+}
+
+// handleTraffic streams real-time traffic from sing-box Clash API as SSE.
+// Clash API /traffic returns newline-delimited JSON; we convert to SSE for browser EventSource.
+func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
+	// Connect to sing-box Clash API
+	resp, err := http.Get("http://127.0.0.1:9092/traffic")
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		writeJSON(w, map[string]any{"error": "无法连接到流量统计接口", "details": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// Read NDJSON lines from Clash API and forward as SSE
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		default:
+		}
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			// Each chunk may contain one or more JSON lines; forward as-is in SSE data frames
+			lines := strings.Split(strings.TrimSpace(string(buf[:n])), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				fmt.Fprintf(w, "data: %s\n\n", line)
+			}
+			flusher.Flush()
+		}
+		if readErr != nil {
+			return
+		}
+	}
+}
+
+// handleLogs returns recent console log content from the in-memory ring buffer.
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	content := SharedLogBuffer.Content()
+	writeJSON(w, map[string]any{"logs": content})
 }
 
 // Session management functions
