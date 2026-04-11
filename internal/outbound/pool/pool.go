@@ -281,8 +281,14 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 		if err != nil {
 			p.logger.Warn("initial probe failed for ", member.tag, ": ", err)
 			failedCount++
-			if member.entry != nil {
+			// Immediately blacklist via shared state so the node won't be
+			// selected by pickMember until the blacklist expires.
+			if member.shared != nil {
+				member.shared.recordFailure(err, 1, p.options.BlacklistDuration)
+			} else if member.entry != nil {
 				member.entry.RecordFailure(err)
+			}
+			if member.entry != nil {
 				member.entry.MarkInitialCheckDone(false) // 标记为不可用
 			}
 			cancel()
@@ -296,8 +302,12 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 		if err != nil {
 			p.logger.Warn("initial HTTP probe failed for ", member.tag, ": ", err)
 			failedCount++
-			if member.entry != nil {
+			if member.shared != nil {
+				member.shared.recordFailure(err, 1, p.options.BlacklistDuration)
+			} else if member.entry != nil {
 				member.entry.RecordFailure(err)
+			}
+			if member.entry != nil {
 				member.entry.MarkInitialCheckDone(false)
 			}
 			cancel()
