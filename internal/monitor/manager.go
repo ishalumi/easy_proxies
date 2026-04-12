@@ -339,7 +339,7 @@ func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 		// 如果只要可用节点：
 		// - 跳过已完成检查但不可用的节点
 		// - 保留未完成检查的节点（它们会在首次使用时被检查）
-		if onlyAvailable && snap.InitialCheckDone && !snap.Available {
+		if onlyAvailable && ((snap.InitialCheckDone && !snap.Available) || snap.Blacklisted) {
 			continue
 		}
 		snapshots = append(snapshots, snap)

@@ -28,12 +28,13 @@ type PoolDialer interface {
 
 // Router handles HTTP proxy requests with path-based region routing
 type Router struct {
-	cfg     RouterConfig
-	pools   map[string]PoolDialer // region -> dialer
-	global  PoolDialer            // default pool for requests without region path
-	server  *http.Server
-	mu      sync.RWMutex
-	logger  *log.Logger
+	cfg        RouterConfig
+	pools      map[string]PoolDialer          // region -> dialer
+	global     PoolDialer                     // default pool for requests without region path
+	transports map[PoolDialer]*http.Transport // cached transports per dialer
+	server     *http.Server
+	mu         sync.RWMutex
+	logger     *log.Logger
 }
 
 // NewRouter creates a new GeoIP router
@@ -42,9 +43,10 @@ func NewRouter(cfg RouterConfig, logger *log.Logger) *Router {
 		logger = log.Default()
 	}
 	return &Router{
-		cfg:    cfg,
-		pools:  make(map[string]PoolDialer),
-		logger: logger,
+		cfg:        cfg,
+		pools:      make(map[string]PoolDialer),
+		transports: make(map[PoolDialer]*http.Transport),
+		logger:     logger,
 	}
 }
 
@@ -53,6 +55,8 @@ func (r *Router) SetPool(region string, dialer PoolDialer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pools[region] = dialer
+	// Clear transport cache since pools changed
+	r.transports = make(map[PoolDialer]*http.Transport)
 }
 
 // SetGlobalPool sets the default pool for requests without region path
@@ -60,6 +64,8 @@ func (r *Router) SetGlobalPool(dialer PoolDialer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.global = dialer
+	// Clear transport cache since pools changed
+	r.transports = make(map[PoolDialer]*http.Transport)
 }
 
 // Start starts the GeoIP router HTTP server
@@ -238,6 +244,30 @@ func (r *Router) handleConnect(w http.ResponseWriter, req *http.Request, dialer 
 	wg.Wait()
 }
 
+// getTransport returns a cached http.Transport for the given dialer, creating one if needed.
+func (r *Router) getTransport(dialer PoolDialer) *http.Transport {
+	r.mu.RLock()
+	t, ok := r.transports[dialer]
+	r.mu.RUnlock()
+	if ok {
+		return t
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Double-check after acquiring write lock
+	if t, ok = r.transports[dialer]; ok {
+		return t
+	}
+	t = &http.Transport{
+		DialContext:         dialer.DialContext,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	r.transports[dialer] = t
+	return t
+}
+
 // handleHTTP handles regular HTTP requests
 func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request, dialer PoolDialer, targetHost string) {
 	ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
@@ -269,10 +299,8 @@ func (r *Router) handleHTTP(w http.ResponseWriter, req *http.Request, dialer Poo
 	outReq.Header.Del("Proxy-Connection")
 	outReq.Header.Del("Proxy-Authorization")
 
-	// Create transport with custom dialer
-	transport := &http.Transport{
-		DialContext: dialer.DialContext,
-	}
+	// Use cached transport with connection pooling
+	transport := r.getTransport(dialer)
 
 	resp, err := transport.RoundTrip(outReq)
 	if err != nil {

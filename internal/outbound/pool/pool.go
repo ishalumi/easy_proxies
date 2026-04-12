@@ -269,63 +269,69 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 	copy(members, p.members)
 	p.mu.Unlock()
 
-	availableCount := 0
-	failedCount := 0
+	// Concurrent probing with bounded workers
+	const maxWorkers = 20
+	type probeResult struct {
+		member  *memberState
+		success bool
+		latency time.Duration
+		err     error
+	}
+
+	results := make(chan probeResult, len(members))
+	sem := make(chan struct{}, maxWorkers)
 
 	for _, member := range members {
-		// Create a timeout context for each probe
-		ctx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
+		sem <- struct{}{} // acquire worker slot
+		go func(m *memberState) {
+			defer func() { <-sem }() // release worker slot
 
-		start := time.Now()
-		conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, destination)
+			ctx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
+			defer cancel()
 
-		if err != nil {
-			p.logger.Warn("initial probe failed for ", member.tag, ": ", err)
+			start := time.Now()
+			conn, err := m.outbound.DialContext(ctx, N.NetworkTCP, destination)
+			if err != nil {
+				results <- probeResult{member: m, err: err}
+				return
+			}
+
+			_, err = httpProbe(conn, destination.AddrString())
+			conn.Close()
+			if err != nil {
+				results <- probeResult{member: m, err: err}
+				return
+			}
+
+			results <- probeResult{member: m, success: true, latency: time.Since(start)}
+		}(member)
+	}
+
+	// Collect results
+	availableCount := 0
+	failedCount := 0
+	for i := 0; i < len(members); i++ {
+		res := <-results
+		if res.err != nil {
+			p.logger.Warn("initial probe failed for ", res.member.tag, ": ", res.err)
 			failedCount++
-			// Immediately blacklist via shared state so the node won't be
-			// selected by pickMember until the blacklist expires.
-			if member.shared != nil {
-				member.shared.recordFailure(err, 1, p.options.BlacklistDuration)
-			} else if member.entry != nil {
-				member.entry.RecordFailure(err)
+			if res.member.shared != nil {
+				res.member.shared.recordFailure(res.err, 1, p.options.BlacklistDuration)
+			} else if res.member.entry != nil {
+				res.member.entry.RecordFailure(res.err)
 			}
-			if member.entry != nil {
-				member.entry.MarkInitialCheckDone(false) // 标记为不可用
+			if res.member.entry != nil {
+				res.member.entry.MarkInitialCheckDone(false)
 			}
-			cancel()
-			continue
+		} else {
+			latencyMs := res.latency.Milliseconds()
+			p.logger.Info("initial probe success for ", res.member.tag, ", latency: ", latencyMs, "ms")
+			availableCount++
+			if res.member.entry != nil {
+				res.member.entry.RecordSuccessWithLatency(res.latency)
+				res.member.entry.MarkInitialCheckDone(true)
+			}
 		}
-
-		// Perform HTTP probe to measure actual latency (TTFB)
-		_, err = httpProbe(conn, destination.AddrString())
-		conn.Close()
-
-		if err != nil {
-			p.logger.Warn("initial HTTP probe failed for ", member.tag, ": ", err)
-			failedCount++
-			if member.shared != nil {
-				member.shared.recordFailure(err, 1, p.options.BlacklistDuration)
-			} else if member.entry != nil {
-				member.entry.RecordFailure(err)
-			}
-			if member.entry != nil {
-				member.entry.MarkInitialCheckDone(false)
-			}
-			cancel()
-			continue
-		}
-
-		// Total latency = dial + HTTP probe
-		latency := time.Since(start)
-		latencyMs := latency.Milliseconds()
-		p.logger.Info("initial probe success for ", member.tag, ", latency: ", latencyMs, "ms")
-		availableCount++
-		if member.entry != nil {
-			member.entry.RecordSuccessWithLatency(latency)
-			member.entry.MarkInitialCheckDone(true)
-		}
-
-		cancel()
 	}
 
 	p.logger.Info("initial health check completed: ", availableCount, " available, ", failedCount, " failed")
