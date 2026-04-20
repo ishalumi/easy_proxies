@@ -3,2291 +3,1751 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Easy Proxies - 节点监控</title>
+  <title>Easy Proxies - 监控中心</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
     :root {
-      --sf-pro: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
-      --primary: #007aff;
-      --primary-hover: #0051d5;
-      --success: #34c759;
-      --warning: #ff9500;
-      --error: #ff3b30;
-      --text-primary: #1d1d1f;
-      --text-secondary: #86868b;
-      --bg-elevated: rgba(255, 255, 255, 0.82);
-      --bg-base: #f5f5f7;
-      --border: rgba(0, 0, 0, 0.06);
-      --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
-      --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.07);
-      --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.1);
+      /* Dark Theme (Default) */
+      --bg-base: #0f172a;
+      --bg-panel: #1e293b;
+      --bg-hover: #334155;
+      --bg-input: #0f172a;
+      --border: #334155;
+      --border-light: rgba(255, 255, 255, 0.1);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --success-bg: rgba(16, 185, 129, 0.1);
+      --warning: #f59e0b;
+      --warning-bg: rgba(245, 158, 11, 0.1);
+      --error: #ef4444;
+      --error-bg: rgba(239, 68, 68, 0.1);
+      --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: "JetBrains Mono", "Fira Code", Consolas, monospace;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+    }
+    [data-theme="light"] {
+      --bg-base: #f8fafc;
+      --bg-panel: #ffffff;
+      --bg-hover: #f1f5f9;
+      --bg-input: #f8fafc;
+      --border: #e2e8f0;
+      --border-light: rgba(0, 0, 0, 0.05);
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
     }
 
-    body {
-      font-family: var(--sf-pro);
-      background: var(--bg-base);
-      color: var(--text-primary);
-      line-height: 1.47059;
-      font-size: 14px;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
+    /* Minimalist Scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
     }
-
-    .app {
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 28px 20px;
+    ::-webkit-scrollbar-track {
+      background: transparent;
     }
-
-    /* Header */
-    .header {
-      text-align: center;
-      margin-bottom: 28px;
-    }
-
-    .header h1 {
-      font-size: 30px;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      color: var(--text-primary);
-      margin-bottom: 4px;
-    }
-
-    .header p {
-      font-size: 15px;
-      color: var(--text-secondary);
-      font-weight: 400;
-    }
-
-    .header .status-line {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      margin-top: 12px;
-      padding: 5px 14px;
-      background: var(--bg-elevated);
-      backdrop-filter: saturate(180%) blur(20px);
-      border-radius: 20px;
-      font-size: 12px;
-      color: var(--text-secondary);
-      border: 1px solid var(--border);
-    }
-
-    .status-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--success);
-      animation: pulse 2s ease-in-out infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.6; transform: scale(0.95); }
-    }
-
-    /* Controls */
-    .controls {
-      display: flex;
-      justify-content: center;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 20px 0 24px;
-    }
-
-    .btn {
-      padding: 7px 16px;
-      border: none;
-      border-radius: 980px;
-      font-size: 13px;
-      font-weight: 500;
-      font-family: var(--sf-pro);
-      cursor: pointer;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      backdrop-filter: saturate(180%) blur(20px);
-    }
-
-    .btn-primary {
-      background: var(--primary);
-      color: white;
-      box-shadow: 0 1px 6px rgba(0, 122, 255, 0.25);
-    }
-
-    .btn-primary:hover {
-      background: var(--primary-hover);
-      transform: translateY(-1px);
-      box-shadow: 0 3px 12px rgba(0, 122, 255, 0.35);
-    }
-
-    .btn-secondary {
-      background: var(--bg-elevated);
-      color: var(--text-primary);
-      border: 1px solid var(--border);
-    }
-
-    .btn-secondary:hover {
-      background: rgba(255, 255, 255, 0.95);
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-md);
-    }
-
-    .btn:active {
-      transform: translateY(0);
-    }
-
-    .btn-sm {
-      padding: 4px 12px;
-      font-size: 12px;
-    }
-
-    /* Stats */
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 10px;
-      margin-bottom: 24px;
-    }
-
-    .stat-card {
-      background: var(--bg-elevated);
-      backdrop-filter: saturate(180%) blur(20px);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px 16px;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-
-    .stat-card:hover {
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-md);
-    }
-
-    .stat-label {
-      font-size: 11px;
-      color: var(--text-secondary);
-      margin-bottom: 4px;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
-    }
-
-    .stat-value {
-      font-size: 28px;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      line-height: 1.1;
-    }
-
-    .stat-trend {
-      font-size: 11px;
-      color: var(--success);
-      margin-top: 2px;
-      font-weight: 500;
-    }
-
-    /* Region Cards */
-    .region-card {
-      cursor: pointer;
-      position: relative;
-    }
-
-    .region-card:hover {
-      border-color: var(--primary);
-    }
-
-    .region-card.active {
-      border-color: var(--primary);
-      box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.15);
-    }
-
-    .region-card .stat-value {
-      font-size: 22px;
-    }
-
-    .region-card .stat-trend {
-      color: var(--text-secondary);
-    }
-
-    /* Region Filter */
-    .region-filter {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-
-    .region-btn {
-      padding: 4px 10px;
-      font-size: 12px;
-      border-radius: 6px;
-      background: var(--bg-elevated);
-      border: 1px solid var(--border);
-      color: var(--text-secondary);
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-
-    .region-btn:hover {
-      border-color: var(--primary);
-      color: var(--primary);
-    }
-
-    .region-btn.active {
-      background: var(--primary);
-      border-color: var(--primary);
-      color: white;
-    }
-
-    /* Region Badge in Node Card */
-    .region-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 3px;
-      padding: 2px 6px;
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
       border-radius: 4px;
-      font-size: 10px;
-      font-weight: 600;
-      background: rgba(0, 122, 255, 0.08);
-      color: var(--primary);
-      margin-left: 6px;
-      vertical-align: middle;
     }
-
-    /* Nodes Grid */
-    .nodes-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-      gap: 10px;
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
     }
-
-    .node-card {
-      background: var(--bg-elevated);
-      backdrop-filter: saturate(180%) blur(20px);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px 16px;
-      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-      position: relative;
-      overflow: hidden;
-      content-visibility: auto;
-      contain-intrinsic-size: 0 150px;
-    }
-
-    .node-card::before {
-      content: '';
-      position: absolute;
-      left: 0;
-      top: 0;
-      width: 3px;
-      height: 100%;
-      transition: all 0.3s;
-    }
-
-    .node-card.healthy::before { background: var(--success); }
-    .node-card.warning::before { background: var(--warning); }
-    .node-card.error::before { background: var(--error); }
-    .node-card.blacklisted::before { background: var(--text-primary); }
-
-    .node-card:hover {
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-md);
-      border-color: rgba(0, 0, 0, 0.1);
-    }
-
-    .node-header {
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: var(--font-ui);
+      background: var(--bg-base);
+      color: var(--text-main);
+      font-size: 13px;
       display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 10px;
-      gap: 8px;
-    }
-
-    .node-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .node-name {
-      font-size: 14px;
-      font-weight: 650;
-      letter-spacing: -0.01em;
-      color: var(--text-primary);
+      height: 100vh;
       overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      line-height: 1.3;
     }
-
-    .node-tag {
-      font-size: 11px;
-      color: var(--text-secondary);
-      font-family: "SF Mono", Menlo, Monaco, monospace;
-      font-weight: 500;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      margin-top: 1px;
-    }
-
-    .status-badge {
-      padding: 3px 8px;
-      border-radius: 6px;
-      font-size: 11px;
-      font-weight: 600;
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      white-space: nowrap;
-      letter-spacing: 0.01em;
-      flex-shrink: 0;
-    }
-
-    .status-badge.healthy {
-      background: rgba(52, 199, 89, 0.12);
-      color: #1f9b47;
-    }
-
-    .status-badge.warning {
-      background: rgba(255, 149, 0, 0.12);
-      color: #c27100;
-    }
-
-    .status-badge.error {
-      background: rgba(255, 59, 48, 0.12);
-      color: #d32f2f;
-    }
-
-    .status-badge.blacklisted {
-      background: rgba(29, 29, 31, 0.1);
-      color: var(--text-primary);
-    }
-
-    .status-icon {
-      width: 5px;
-      height: 5px;
-      border-radius: 50%;
-      background: currentColor;
-    }
-
-    /* Compact inline metrics row */
-    .metrics-row {
+    /* Layout */
+    .sidebar {
+      width: 240px;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border);
       display: flex;
-      gap: 0;
-      margin-bottom: 10px;
-      background: rgba(0, 0, 0, 0.02);
-      border-radius: 8px;
-      overflow: hidden;
+      flex-direction: column;
+      box-shadow: var(--shadow-sm);
+      z-index: 10;
     }
-
-    .metrics-row .metric-cell {
-      flex: 1;
-      padding: 8px 10px;
-      text-align: center;
-      position: relative;
-    }
-
-    .metrics-row .metric-cell:not(:last-child)::after {
-      content: '';
-      position: absolute;
-      right: 0;
-      top: 20%;
-      height: 60%;
-      width: 1px;
-      background: rgba(0, 0, 0, 0.06);
-    }
-
-    .metrics-row .metric-cell .m-label {
-      font-size: 10px;
-      color: var(--text-secondary);
-      font-weight: 500;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      margin-bottom: 2px;
-    }
-
-    .metrics-row .metric-cell .m-value {
-      font-size: 15px;
-      font-weight: 700;
-      letter-spacing: -0.01em;
-      color: var(--text-primary);
-      line-height: 1.2;
-    }
-
-    .metrics-row .metric-cell .m-value.success { color: var(--success); }
-    .metrics-row .metric-cell .m-value.error { color: var(--error); }
-    .metrics-row .metric-cell .m-value.warning { color: var(--warning); }
-    .metrics-row .metric-cell .m-value.primary { color: var(--primary); }
-    .metrics-row .metric-cell .m-value.muted { color: var(--text-secondary); font-size: 12px; }
-
-    /* Legacy metrics grid (debug tab) */
-    .metrics {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-      gap: 8px;
-      margin-bottom: 10px;
-    }
-
-    .metric {
-      background: rgba(0, 0, 0, 0.02);
-      border-radius: 8px;
-      padding: 8px 10px;
-      transition: all 0.2s;
-    }
-
-    .metric:hover {
-      background: rgba(0, 0, 0, 0.04);
-    }
-
-    .metric-label {
-      font-size: 10px;
-      color: var(--text-secondary);
-      margin-bottom: 2px;
-      font-weight: 500;
-      text-transform: uppercase;
-      letter-spacing: 0.02em;
-    }
-
-    .metric-value {
+    .brand {
+      height: 60px;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
       font-size: 16px;
       font-weight: 700;
-      letter-spacing: -0.01em;
-      color: var(--text-primary);
+      gap: 10px;
     }
-
-    .metric-value.success { color: var(--success); }
-    .metric-value.error { color: var(--error); }
-    .metric-value.warning { color: var(--warning); }
-
-    /* Node Footer */
-    .node-footer {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-      padding-top: 8px;
-      border-top: 1px solid var(--border);
+    .brand-icon {
+      width: 28px; height: 28px;
+      background: linear-gradient(135deg, rgba(59,130,246,0.15), rgba(139,92,246,0.15));
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 12px rgba(96,165,250,0.3);
+      animation: brandGlow 3s ease-in-out infinite;
     }
-
-    .time-info {
-      font-size: 11px;
-      color: var(--text-secondary);
-      line-height: 1.5;
+    @keyframes brandGlow {
+      0%, 100% { box-shadow: 0 0 8px rgba(96,165,250,0.2); }
+      50% { box-shadow: 0 0 16px rgba(139,92,246,0.4); }
+    }
+    .nav { padding: 16px 0; flex: 1; }
+    .nav-item {
+      padding: 10px 20px;
+      display: flex; align-items: center; gap: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .nav-item:hover { background: rgba(100,100,100,0.05); color: var(--text-main); }
+    .nav-item.active { background: rgba(59, 130, 246, 0.1); color: var(--primary); border-right: 3px solid var(--primary); }
+    
+    .main {
       flex: 1;
       display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
+      flex-direction: column;
+      overflow: hidden;
     }
-
-    .time-info > div {
-      white-space: nowrap;
-    }
-
-    /* Toast */
-    .toast {
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      background: rgba(255, 255, 255, 0.95);
-      backdrop-filter: saturate(180%) blur(20px);
-      border: 1px solid var(--border);
-      padding: 12px 18px;
-      border-radius: 12px;
-      box-shadow: var(--shadow-lg);
-      display: none;
+    .header {
+      height: 60px;
+      background: var(--bg-base);
+      border-bottom: 1px solid var(--border);
+      display: flex;
       align-items: center;
-      gap: 10px;
-      max-width: 380px;
-      z-index: 1000;
-      animation: slideIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      justify-content: space-between;
+      padding: 0 24px;
     }
-
-    .toast.show { display: flex; }
-
-    @keyframes slideIn {
-      from {
-        transform: translateX(100px);
-        opacity: 0;
-      }
-      to {
-        transform: translateX(0);
-        opacity: 1;
-      }
-    }
-
-    .toast.success { border-left: 3px solid var(--success); }
-    .toast.error { border-left: 3px solid var(--error); }
-
-    .toast-message {
-      flex: 1;
-      font-size: 13px;
-      font-weight: 500;
-    }
-
-    /* Empty State */
-    .empty {
-      text-align: center;
-      padding: 48px 32px;
-      background: var(--bg-elevated);
-      backdrop-filter: saturate(180%) blur(20px);
+    .header-left { display: flex; align-items: center; gap: 16px; }
+    .status-indicator {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 12px;
+      background: var(--bg-panel); border-radius: 12px;
+      font-size: 12px; color: var(--text-muted);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      box-shadow: var(--shadow-sm);
     }
-
-    .empty h3 {
-      font-size: 17px;
-      color: var(--text-primary);
-      margin: 16px 0 6px;
-      font-weight: 700;
-    }
-
-    .empty p {
-      color: var(--text-secondary);
-      font-size: 13px;
-    }
-
-    /* Login Modal */
-    .login-overlay {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(0, 0, 0, 0.4);
-      backdrop-filter: blur(10px);
-      display: none;
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 8px var(--success); }
+    
+    .header-actions { display: flex; gap: 10px; align-items: center; }
+    
+    /* Theme Toggle */
+    .theme-toggle {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
       align-items: center;
       justify-content: center;
-      z-index: 2000;
-      animation: fadeIn 0.3s;
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      transition: all 0.2s;
+      position: relative;
     }
-
-    .login-overlay.show { display: flex; }
-
-    @keyframes fadeIn {
-      from { opacity: 0; }
-      to { opacity: 1; }
+    .theme-toggle:hover {
+      background: var(--bg-hover);
+      color: var(--text-main);
     }
+    .theme-toggle .icon-sun,
+    .theme-toggle .icon-moon,
+    .theme-toggle .icon-auto { display: none; }
+    .theme-toggle[data-mode="dark"] .icon-moon { display: block; }
+    .theme-toggle[data-mode="light"] .icon-sun { display: block; }
+    .theme-toggle[data-mode="auto"] .icon-auto { display: block; }
+    .theme-mode-label {
+      position: absolute;
+      bottom: -18px; left: 50%; transform: translateX(-50%);
+      font-size: 10px; color: var(--text-muted); white-space: nowrap;
+      pointer-events: none; opacity: 0; transition: opacity 0.2s;
+    }
+    .theme-toggle:hover .theme-mode-label { opacity: 1; }
 
-    .login-modal {
-      background: var(--bg-elevated);
-      backdrop-filter: saturate(180%) blur(20px);
+    .content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+    }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; animation: fadeIn 0.3s; }
+    .setting-input {
+      background: var(--bg-input); border: 1px solid var(--border); color: var(--text-main);
+      padding: 8px 12px; border-radius: 6px; font-family: var(--font-mono); font-size: 13px;
+      outline: none; width: 100%; box-sizing: border-box; transition: border-color 0.2s;
+    }
+    .setting-input:focus { border-color: var(--primary); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* UI Components */
+    .btn {
+      padding: 6px 14px;
+      background: var(--bg-hover);
       border: 1px solid var(--border);
-      border-radius: 20px;
-      padding: 36px;
-      box-shadow: var(--shadow-lg);
-      max-width: 400px;
-      width: 90%;
-      animation: slideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      color: var(--text-main);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      display: inline-flex; align-items: center; gap: 6px;
+      transition: all 0.2s;
     }
+    .btn:hover { filter: brightness(1.1); }
+    .btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+    .btn-success { background: var(--success); border-color: var(--success); color: #fff; }
+    .btn-danger { background: var(--error); border-color: var(--error); color: #fff; }
+    .btn-sm { padding: 4px 10px; font-size: 11px; }
 
-    @keyframes slideUp {
-      from {
-        transform: translateY(40px);
-        opacity: 0;
-      }
-      to {
-        transform: translateY(0);
-        opacity: 1;
-      }
-    }
-
-    .login-header {
-      text-align: center;
+    /* Dashboard Grid */
+    .overview-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 16px;
       margin-bottom: 24px;
     }
-
-    .login-header h2 {
-      font-size: 24px;
-      font-weight: 700;
-      letter-spacing: -0.015em;
-      margin-bottom: 4px;
+    @media (max-width: 1200px) {
+      .overview-grid { grid-template-columns: repeat(3, 1fr); }
     }
-
-    .login-header p {
-      color: var(--text-secondary);
-      font-size: 14px;
+    @media (max-width: 768px) {
+      .overview-grid { grid-template-columns: repeat(2, 1fr); }
     }
-
-    .login-form {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-
-    .form-group {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .form-label {
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--text-primary);
-    }
-
-    .form-input {
-      padding: 10px 14px;
+    .stat-panel {
+      background: var(--bg-panel);
       border: 1px solid var(--border);
       border-radius: 10px;
-      font-size: 14px;
-      font-family: var(--sf-pro);
-      background: rgba(255, 255, 255, 0.8);
-      transition: all 0.2s;
+      padding: 16px;
+      box-shadow: var(--shadow-sm);
+      transition: transform 0.2s, box-shadow 0.2s;
     }
-
-    .form-input:focus {
-      outline: none;
-      border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.1);
-    }
-
-    .form-help {
-      font-size: 11px;
-      color: var(--text-secondary);
-      margin-top: 2px;
-    }
-
-    .login-error {
-      color: var(--error);
-      font-size: 12px;
-      margin-top: -8px;
-      display: none;
-    }
-
-    .login-error.show { display: block; }
-
-    /* Tabs */
-    .tabs {
-      display: flex;
-      justify-content: center;
-      gap: 6px;
-      margin-bottom: 20px;
-    }
-
-    .tab {
-      padding: 7px 18px;
-      border: none;
-      border-radius: 980px;
-      font-size: 13px;
-      font-weight: 500;
-      font-family: var(--sf-pro);
-      cursor: pointer;
-      background: var(--bg-elevated);
-      color: var(--text-secondary);
-      border: 1px solid var(--border);
-      transition: all 0.2s;
-    }
-
-    .tab:hover {
-      background: rgba(255, 255, 255, 0.95);
-      color: var(--text-primary);
-    }
-
-    .tab.active {
-      background: var(--primary);
-      color: white;
-      border-color: var(--primary);
-    }
-
-    .tab-content {
-      display: none;
-    }
-
-    .tab-content.active {
-      display: block;
-    }
-
-    /* Node Management */
-    .manage-header {
-      text-align: center;
-      margin-bottom: 20px;
-    }
-
-    .manage-header h2 {
-      font-size: 22px;
-      font-weight: 700;
-      margin-bottom: 4px;
-    }
-
-    .manage-desc {
-      color: var(--text-secondary);
-      font-size: 13px;
-    }
-
-    .manage-actions {
-      display: flex;
-      justify-content: center;
-      gap: 8px;
-      margin-bottom: 12px;
-    }
-
-    .btn-warning {
-      background: var(--warning);
-      color: white;
-      box-shadow: 0 1px 6px rgba(255, 149, 0, 0.25);
-    }
-
-    .btn-warning:hover {
-      background: #e68600;
-      transform: translateY(-1px);
-      box-shadow: 0 3px 12px rgba(255, 149, 0, 0.35);
-    }
-
-    .btn-danger {
-      background: var(--error);
-      color: white;
-    }
-
-    .btn-danger:hover {
-      background: #e62e24;
-    }
-
-    .reload-warning {
-      text-align: center;
-      padding: 8px 16px;
-      background: rgba(255, 149, 0, 0.08);
-      border: 1px solid rgba(255, 149, 0, 0.2);
-      border-radius: 8px;
-      color: var(--warning);
-      font-size: 12px;
-      font-weight: 500;
-      margin-bottom: 20px;
-    }
-
-    .config-nodes-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-      gap: 10px;
-    }
-
-    .config-node-card {
-      background: var(--bg-elevated);
-      backdrop-filter: saturate(180%) blur(20px);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px 16px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      transition: all 0.25s;
-    }
-
-    .config-node-card:hover {
-      transform: translateY(-1px);
+    .stat-panel:hover {
+      transform: translateY(-2px);
       box-shadow: var(--shadow-md);
     }
+    .stat-title { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; font-weight: 600; }
+    .stat-value { font-size: 28px; font-weight: 300; font-family: var(--font-mono); }
+    .stat-sub { font-size: 12px; color: var(--success); margin-top: 4px; display: flex; justify-content: space-between;}
 
-    .config-node-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .config-node-name {
-      font-size: 14px;
-      font-weight: 600;
-      margin-bottom: 2px;
-    }
-
-    .config-node-uri {
-      font-size: 11px;
-      color: var(--text-secondary);
-      font-family: "SF Mono", Menlo, Monaco, monospace;
+    /* Table */
+    .panel {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
       overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: 400px;
+      box-shadow: var(--shadow-sm);
     }
-
-    .config-node-port {
-      font-size: 12px;
-      color: var(--primary);
-      font-weight: 500;
-      margin-top: 2px;
-    }
-
-    .config-node-actions {
-      display: flex;
-      gap: 6px;
-      flex-shrink: 0;
-    }
-
-    .modal-buttons {
-      display: flex;
-      gap: 10px;
-      margin-top: 4px;
-    }
-
-    .modal-buttons .btn {
-      flex: 1;
-    }
-
-    /* Toggle Switch */
-    .toggle-switch {
-      position: relative;
-      display: inline-block;
-      width: 44px;
-      height: 24px;
-      flex-shrink: 0;
-    }
-
-    .toggle-switch input {
-      opacity: 0;
-      width: 0;
-      height: 0;
-    }
-
-    .toggle-slider {
-      position: absolute;
-      cursor: pointer;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background-color: #ccc;
-      transition: 0.3s;
-      border-radius: 24px;
-    }
-
-    .toggle-slider:before {
-      position: absolute;
-      content: "";
-      height: 18px;
-      width: 18px;
-      left: 3px;
-      bottom: 3px;
-      background-color: white;
-      transition: 0.3s;
-      border-radius: 50%;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-    }
-
-    .toggle-switch input:checked + .toggle-slider {
-      background-color: var(--primary);
-    }
-
-    .toggle-switch input:checked + .toggle-slider:before {
-      transform: translateX(20px);
-    }
-
-    /* Probe Progress */
-    .probe-progress {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      background: var(--bg-elevated);
-      backdrop-filter: saturate(180%) blur(20px);
+    .panel-header {
+      padding: 16px;
       border-bottom: 1px solid var(--border);
-      padding: 12px 20px;
-      z-index: 1500;
-      display: none;
-      animation: slideDown 0.3s ease;
+      display: flex; justify-content: space-between; align-items: center;
     }
-
-    .probe-progress.show { display: block; }
-
-    @keyframes slideDown {
-      from { transform: translateY(-100%); }
-      to { transform: translateY(0); }
-    }
-
-    .probe-progress-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-
-    .probe-progress-title {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text-primary);
-    }
-
-    .probe-progress-stats {
-      font-size: 12px;
-      color: var(--text-secondary);
-    }
-
-    .probe-progress-bar {
-      height: 4px;
-      background: rgba(0, 0, 0, 0.08);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-
-    .probe-progress-fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--primary), var(--success));
-      border-radius: 2px;
-      transition: width 0.3s ease;
-      width: 0%;
-    }
-
-    .probe-progress-detail {
-      margin-top: 6px;
+    .panel-title { font-size: 14px; font-weight: 600; }
+    .table-container { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    th {
+      padding: 12px 16px;
+      color: var(--text-muted);
       font-size: 11px;
-      color: var(--text-secondary);
-      display: flex;
-      gap: 12px;
+      text-transform: uppercase;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      background: rgba(100,100,100,0.05);
+    }
+    td {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    tr:hover { background: rgba(100,100,100,0.02); }
+    
+    .badge {
+      padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500;
+    }
+    .badge-healthy { background: var(--success-bg); color: var(--success); border: 1px solid var(--success); }
+    .badge-warning { background: var(--warning-bg); color: var(--warning); border: 1px solid var(--warning); }
+    .badge-error { background: var(--error-bg); color: var(--error); border: 1px solid var(--error); }
+    .badge-offline { background: var(--bg-hover); color: var(--text-muted); border: 1px solid var(--border); }
+
+    .tt-mono { font-family: var(--font-mono); font-size: 12px; }
+    
+    /* Progress Bar */
+    .progress-wrapper { display: none; position: absolute; top: 0; left: 0; right: 0; z-index: 100; }
+    .progress-wrapper.show { display: block; }
+    .progress-bar { height: 4px; background: var(--border); }
+    .progress-fill { height: 100%; background: var(--success); width: 0%; transition: width 0.3s; }
+    .progress-float { 
+      position: absolute; right: 24px; top: 12px; background: var(--bg-panel); 
+      border: 1px solid var(--border); padding: 8px 16px; border-radius: 6px;
+      display: flex; gap: 16px; font-size: 12px; box-shadow: var(--shadow-md);
     }
 
-    .probe-progress-detail .success { color: var(--success); }
-    .probe-progress-detail .failed { color: var(--error); }
-
-    /* Responsive */
-    @media (max-width: 768px) {
-      .app { padding: 16px 12px; }
-      .header h1 { font-size: 24px; }
-      .header p { font-size: 14px; }
-      .stats { grid-template-columns: repeat(2, 1fr); }
-      .nodes-grid { grid-template-columns: 1fr; }
-      .config-nodes-grid { grid-template-columns: 1fr; }
-      .metrics { grid-template-columns: repeat(2, 1fr); }
-      .controls { flex-direction: column; }
-      .btn { width: 100%; justify-content: center; }
-      .login-modal { padding: 28px 20px; }
-      .tabs { flex-direction: column; }
-      .tab { width: 100%; }
-      .manage-actions { flex-direction: column; }
-      .config-node-card { flex-direction: column; align-items: stretch; }
-      .config-node-actions { justify-content: flex-end; }
-      .time-info { flex-direction: column; gap: 2px; }
+    /* Modal */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5); backdrop-filter: blur(4px);
+      display: none; align-items: center; justify-content: center; z-index: 1000;
     }
-
-    @media (min-width: 1200px) {
-      .nodes-grid {
-        grid-template-columns: repeat(3, 1fr);
-      }
+    .modal-overlay.show { display: flex; }
+    .modal {
+      background: var(--bg-panel); border: 1px solid var(--border);
+      border-radius: 8px; width: 400px; box-shadow: var(--shadow-md);
     }
+    .modal-header { padding: 16px 24px; border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 600; }
+    .modal-body { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+    .modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+    
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .checkbox-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .checkbox-row:hover { border-color: var(--primary); }
+    .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; margin: 0; }
+    .checkbox-row label { margin: 0; cursor: pointer; font-size: 13px; color: var(--text-main); }
+    .checkbox-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+      margin-bottom: 16px;
+    }
+    label { font-size: 12px; color: var(--text-muted); }
+    input[type="text"], input[type="password"], input[type="number"] {
+      background: var(--bg-input); border: 1px solid var(--border); color: var(--text-main);
+      padding: 8px 12px; border-radius: 6px; font-family: var(--font-mono); font-size: 13px; outline: none;
+    }
+    input:focus { border-color: var(--primary); }
+    
+    .region-filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+    .region-btn { padding: 4px 10px; border-radius: 4px; background: var(--bg-input); border: 1px solid var(--border); color: var(--text-muted); cursor: pointer; font-size: 12px; }
+    .region-btn.active { background: rgba(59,130,246,0.1); border-color: var(--primary); color: var(--primary); }
+
+    .toast-container { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 10px; z-index: 2000; }
+    .toast { padding: 12px 16px; border-radius: 6px; background: var(--bg-panel); border-left: 4px solid var(--primary); box-shadow: 0 5px 15px rgba(0,0,0,0.3); font-size: 13px; animation: slideInX 0.3s; }
+    .toast.success { border-color: var(--success); }
+    .toast.error { border-color: var(--error); }
+    @keyframes slideInX { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+    /* Latency Bars */
+    .lat-bar { width: 40px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; display: inline-block; vertical-align: middle; margin-left: 8px; }
+    .lat-fill { height: 100%; border-radius: 2px; }
+    
+    .timeline { display: flex; gap: 2px; }
+    .tl-dot { width: 6px; height: 16px; border-radius: 2px; }
+    .tl-dot.success { background: var(--success); }
+    .tl-dot.error { background: var(--error); }
+    
+    /* ECharts containers */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .chart-panel {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      height: 320px;
+      position: relative;
+    }
+    .chart-title {
+      position: absolute;
+      top: 16px; left: 16px;
+      font-size: 14px; font-weight: 600; color: var(--text-main);
+      z-index: 10;
+    }
+    .chart-container { width: 100%; height: 100%; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <script>
+    // Set theme before first paint to prevent FOUC
+    (function(){
+      var mode = localStorage.getItem('themeMode');
+      if (!mode) {
+        var legacy = localStorage.getItem('theme');
+        mode = legacy || 'auto';
+      }
+      var visual = mode === 'auto'
+        ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+        : mode;
+      document.documentElement.setAttribute('data-theme', visual);
+    })();
+  </script>
 </head>
 <body>
-  <div class="app">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+          <path d="M2 16l4-4 4 6 4-10 4 4 4-6" stroke="url(#brandGrad)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <animate attributeName="stroke-dasharray" values="0,100;50,0;0,100" dur="3s" repeatCount="indefinite"/>
+          </path>
+          <defs><linearGradient id="brandGrad" x1="0" y1="0" x2="24" y2="0"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#a78bfa"/></linearGradient></defs>
+        </svg>
+      </div>
+      Easy Proxies
+    </div>
+    <div class="nav">
+      <div class="nav-item active" onclick="switchTab('dashboard')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+        监控看板
+      </div>
+      <div class="nav-item" onclick="switchTab('manage')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+        节点配置
+      </div>
+      <div class="nav-item" onclick="switchTab('debug')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+        诊断分析
+      </div>
+      <div class="nav-item" onclick="switchTab('logs')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+        控制台日志
+      </div>
+      <div class="nav-item" onclick="switchTab('settings')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        系统设置
+      </div>
+    </div>
+    <div style="padding: 0 20px 16px; text-align: center;">
+      <a href="https://github.com/jasonwong1991/easy_proxies" target="_blank" rel="noopener" style="display:inline-flex; align-items:center; gap:6px; color:var(--text-muted); text-decoration:none; font-size:12px; padding:6px 10px; border-radius:6px; border:1px solid var(--border); transition:all 0.2s;" onmouseover="this.style.borderColor='var(--primary)';this.style.color='var(--text-main)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text-muted)'">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+        <span id="githubStars">-</span>
+      </a>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main">
+    <div class="progress-wrapper" id="probeProgress">
+      <div class="progress-bar"><div class="progress-fill" id="probeProgressFill"></div></div>
+      <div class="progress-float">
+        <span style="color:var(--text-main)">探测中: <span id="probeStats">0/0</span></span>
+        <span style="color:var(--success)">成功: <span id="probeSuccess">0</span></span>
+        <span style="color:var(--error)">失败: <span id="probeFail">0</span></span>
+      </div>
+    </div>
+
+    <!-- Header -->
     <header class="header">
-      <h1>Easy Proxies</h1>
-      <p>节点监控中心</p>
-      <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px;">
-        <div class="status-line" style="margin-top: 0;">
-          <span class="status-dot"></span>
-          <span id="lastUpdate">正在加载...</span>
+      <div class="header-left">
+        <div class="status-indicator">
+          <div class="status-dot"></div>
+          <span id="lastUpdate">System Online</span>
         </div>
-        <button class="btn btn-secondary" onclick="showSettingsModal()" style="padding: 0; border-radius: 50%; width: 30px; height: 30px; min-width: 30px; display: flex; align-items: center; justify-content: center;" title="系统设置">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-          </svg>
+      </div>
+      <div class="header-actions">
+        <button class="theme-toggle" id="themeToggleBtn" onclick="toggleTheme()" title="切换主题" data-mode="auto">
+          <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+          <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+          <svg class="icon-auto" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+          <span class="theme-mode-label" id="themeModeLabel">跟随系统</span>
         </button>
+        <button class="btn btn-primary" onclick="probeAllNodes()">⚡ 批量探测</button>
+        <button class="btn" id="refreshSubBtn" onclick="refreshSubscription()" style="display:none;">刷新订阅</button>
+        <button class="btn" onclick="exportNodes()">导出配置</button>
+        <button class="btn" onclick="toggleAutoRefresh()" id="autoRefreshBtn">⏹ 关闭自动刷新</button>
+        <button class="btn" onclick="refresh()">↺ 刷新</button>
       </div>
     </header>
 
-    <!-- Tab 切换 -->
-    <div class="tabs">
-      <button class="tab active" onclick="switchTab('monitor')">📊 节点监控</button>
-      <button class="tab" onclick="switchTab('manage')">⚙️ 节点管理</button>
-      <button class="tab" onclick="switchTab('debug')">🐞 调试面板</button>
-    </div>
-
-    <!-- 监控页面 -->
-    <div id="monitorTab" class="tab-content active">
-    <div class="controls">
-      <button class="btn btn-primary" onclick="refresh()">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M13.65 2.35A7.958 7.958 0 0 0 8 0C3.58 0 0 3.58 0 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L9 7h7V0l-2.35 2.35z" fill="currentColor"/>
-        </svg>
-        刷新数据
-      </button>
-      <button class="btn btn-primary" id="probeAllBtn" onclick="probeAllNodes()">
-        ⚡ 探测全部
-      </button>
-      <button class="btn btn-secondary" onclick="toggleAutoRefresh()">
-        <span id="autoRefreshText">关闭自动刷新</span>
-      </button>
-      <button class="btn btn-secondary" onclick="exportNodes()">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M8 0L8 10M8 10L5 7M8 10L11 7M2 13h12v3H2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        导出节点
-      </button>
-      <button class="btn btn-secondary" id="refreshSubBtn" onclick="refreshSubscription()" style="display: none;">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M13.65 2.35A7.958 7.958 0 0 0 8 0C3.58 0 0 3.58 0 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L9 7h7V0l-2.35 2.35z" fill="currentColor"/>
-        </svg>
-        <span id="refreshSubText">刷新订阅</span>
-      </button>
-    </div>
-
-    <div class="stats">
-      <div class="stat-card">
-        <div class="stat-label">总节点</div>
-        <div class="stat-value" id="totalNodes">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">健康节点</div>
-        <div class="stat-value" style="color: var(--success);" id="healthyNodes">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">活跃连接</div>
-        <div class="stat-value" style="color: var(--primary);" id="activeConnections">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">拉黑节点</div>
-        <div class="stat-value" style="color: var(--error);" id="blacklistedNodes">0</div>
-      </div>
-      <div class="stat-card" id="subscriptionCard" style="display: none;">
-        <div class="stat-label">订阅状态</div>
-        <div class="stat-value" style="font-size: 20px;" id="subscriptionStatus">-</div>
-        <div class="stat-trend" id="subscriptionTrend">未启用</div>
-      </div>
-    </div>
-
-    <!-- GeoIP Region Stats -->
-    <div class="stats" id="regionStats" style="display: none;">
-      <div class="stat-card region-card" data-region="jp">
-        <div class="stat-label">🇯🇵 日本</div>
-        <div class="stat-value" id="regionJP">0</div>
-        <div class="stat-trend" id="regionJPHealthy">0 健康</div>
-      </div>
-      <div class="stat-card region-card" data-region="kr">
-        <div class="stat-label">🇰🇷 韩国</div>
-        <div class="stat-value" id="regionKR">0</div>
-        <div class="stat-trend" id="regionKRHealthy">0 健康</div>
-      </div>
-      <div class="stat-card region-card" data-region="us">
-        <div class="stat-label">🇺🇸 美国</div>
-        <div class="stat-value" id="regionUS">0</div>
-        <div class="stat-trend" id="regionUSHealthy">0 健康</div>
-      </div>
-      <div class="stat-card region-card" data-region="hk">
-        <div class="stat-label">🇭🇰 香港</div>
-        <div class="stat-value" id="regionHK">0</div>
-        <div class="stat-trend" id="regionHKHealthy">0 健康</div>
-      </div>
-      <div class="stat-card region-card" data-region="tw">
-        <div class="stat-label">🇹🇼 台湾</div>
-        <div class="stat-value" id="regionTW">0</div>
-        <div class="stat-trend" id="regionTWHealthy">0 健康</div>
-      </div>
-      <div class="stat-card region-card" data-region="other">
-        <div class="stat-label">🌍 其他</div>
-        <div class="stat-value" id="regionOther">0</div>
-        <div class="stat-trend" id="regionOtherHealthy">0 健康</div>
-      </div>
-    </div>
-
-    <!-- Region Filter -->
-    <div class="region-filter" id="regionFilter" style="display: none; margin-bottom: 12px;">
-      <span style="margin-right: 6px; color: var(--text-secondary); font-size: 12px;">筛选地域:</span>
-      <button class="btn btn-sm region-btn active" data-region="all" onclick="filterByRegion('all')">全部</button>
-      <button class="btn btn-sm region-btn" data-region="jp" onclick="filterByRegion('jp')">🇯🇵 JP</button>
-      <button class="btn btn-sm region-btn" data-region="kr" onclick="filterByRegion('kr')">🇰🇷 KR</button>
-      <button class="btn btn-sm region-btn" data-region="us" onclick="filterByRegion('us')">🇺🇸 US</button>
-      <button class="btn btn-sm region-btn" data-region="hk" onclick="filterByRegion('hk')">🇭🇰 HK</button>
-      <button class="btn btn-sm region-btn" data-region="tw" onclick="filterByRegion('tw')">🇹🇼 TW</button>
-      <button class="btn btn-sm region-btn" data-region="other" onclick="filterByRegion('other')">🌍 Other</button>
-    </div>
-
-    <div id="nodesContainer" class="nodes-grid"></div>
-
-    <div id="emptyState" class="empty" style="display: none;">
-      <svg width="48" height="48" viewBox="0 0 64 64" fill="none" opacity="0.2">
-        <circle cx="32" cy="32" r="30" stroke="currentColor" stroke-width="4"/>
-        <path d="M32 16v32M16 32h32" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
-      </svg>
-      <h3>暂无代理节点</h3>
-      <p>请在配置文件中添加代理节点</p>
-    </div>
-    </div><!-- end monitorTab -->
-
-    <!-- 节点管理页面 -->
-    <div id="manageTab" class="tab-content">
-      <div class="manage-header">
-        <h2>节点配置管理</h2>
-        <p class="manage-desc">添加、编辑或删除代理节点。修改后需点击"重载配置"使更改生效。</p>
-      </div>
-
-      <div class="manage-actions">
-        <button class="btn btn-primary" onclick="showAddNodeModal()">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-          添加节点
-        </button>
-        <button class="btn btn-warning" onclick="triggerReload()" id="reloadBtn">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M13.65 2.35A7.958 7.958 0 0 0 8 0C3.58 0 0 3.58 0 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L9 7h7V0l-2.35 2.35z" fill="currentColor"/>
-          </svg>
-          重载配置
-        </button>
-      </div>
-
-      <div class="reload-warning">
-        ⚠️ 重载配置会中断所有现有连接，请谨慎操作
-      </div>
-
-      <div id="subscriptionWarning" class="reload-warning" style="display: none; background: rgba(255, 59, 48, 0.08); border-color: rgba(255, 59, 48, 0.2); color: var(--error);">
-        ⚠️ 当前使用订阅模式：您的修改会保存到 nodes.txt，但下次刷新订阅时将被覆盖
-      </div>
-
-      <div id="configNodesContainer" class="config-nodes-grid"></div>
-
-      <div id="configEmptyState" class="empty" style="display: none;">
-        <svg width="48" height="48" viewBox="0 0 64 64" fill="none" opacity="0.2">
-          <circle cx="32" cy="32" r="30" stroke="currentColor" stroke-width="4"/>
-          <path d="M32 16v32M16 32h32" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
-        </svg>
-        <h3>暂无配置节点</h3>
-        <p>点击"添加节点"开始配置</p>
-      </div>
-    </div><!-- end manageTab -->
-
-    <!-- 调试面板 -->
-    <div id="debugTab" class="tab-content">
-      <div class="manage-header">
-        <h2>调试面板</h2>
-        <p class="manage-desc">查看节点调用统计、成功率和最近使用情况</p>
-      </div>
-
-      <div class="stats">
-        <div class="stat-card">
-          <div class="stat-label">总调用次数</div>
-          <div class="stat-value" id="debugTotalCalls">0</div>
+    <div class="content">
+      <!-- Dashboard Tab -->
+      <div id="dashboardTab" class="tab-content active">
+        <div class="overview-grid">
+          <div class="stat-panel">
+            <div class="stat-title">总节点数</div>
+            <div class="stat-value" id="totalNodes">0</div>
+            <div class="stat-sub"><span id="subscriptionStatus"></span> <span id="subscriptionTrend"></span></div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">健康在线</div>
+            <div class="stat-value" style="color: var(--success);" id="healthyNodes">0</div>
+            <div class="stat-sub">Active & Ready</div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">活跃连接数</div>
+            <div class="stat-value" style="color: var(--primary);" id="activeConnections">0</div>
+            <div class="stat-sub">当前建立会话</div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">异常/拉黑</div>
+            <div class="stat-value" style="color: var(--error);" id="blacklistedNodes">0</div>
+            <div class="stat-sub">不可用节点</div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">↑ 上行速率</div>
+            <div class="stat-value" style="color: #3b82f6; font-size: 22px;" id="liveUpSpeed">0 B/s</div>
+            <div class="stat-sub" style="color: var(--text-muted);">实时上传</div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">↓ 下行速率</div>
+            <div class="stat-value" style="color: #10b981; font-size: 22px;" id="liveDownSpeed">0 B/s</div>
+            <div class="stat-sub" style="color: var(--text-muted);">实时下载</div>
+          </div>
         </div>
-        <div class="stat-card">
-          <div class="stat-label">总成功次数</div>
-          <div class="stat-value" style="color: var(--success);" id="debugTotalSuccess">0</div>
+
+        <div class="charts-grid">
+          <div class="chart-panel">
+            <div class="chart-title">地域连通率 (Region Availability)</div>
+            <div class="chart-container" id="regionChart"></div>
+          </div>
+          <div class="chart-panel">
+            <div class="chart-title">最优节点延迟 (Top Fastest Nodes)</div>
+            <div class="chart-container" id="latencyChart"></div>
+          </div>
+          <div class="chart-panel">
+            <div class="chart-title">实时流量带宽 (Real-time Traffic)</div>
+            <div class="chart-container" id="trafficChart"></div>
+          </div>
         </div>
-        <div class="stat-card">
-          <div class="stat-label">整体成功率</div>
-          <div class="stat-value" id="debugSuccessRate">0%</div>
+
+        <div class="region-filters" id="regionFilter">
+          <span style="color: var(--text-muted); font-size: 12px; margin-top: 4px;">过滤:</span>
+          <button class="region-btn active" data-region="all" onclick="filterByRegion('all')">All</button>
+          <button class="region-btn" data-region="jp" onclick="filterByRegion('jp')">🇯🇵 JP</button>
+          <button class="region-btn" data-region="kr" onclick="filterByRegion('kr')">🇰🇷 KR</button>
+          <button class="region-btn" data-region="us" onclick="filterByRegion('us')">🇺🇸 US</button>
+          <button class="region-btn" data-region="hk" onclick="filterByRegion('hk')">🇭🇰 HK</button>
+          <button class="region-btn" data-region="tw" onclick="filterByRegion('tw')">🇹🇼 TW</button>
+          <button class="region-btn" data-region="sg" onclick="filterByRegion('sg')">🇸🇬 SG</button>
+          <button class="region-btn" data-region="other" onclick="filterByRegion('other')">Other</button>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">节点监控列表</div>
+          </div>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>地域</th>
+                  <th>名称 (Name/Tag)</th>
+                  <th>端口</th>
+                  <th>延迟 / 质量</th>
+                  <th>连接</th>
+                  <th>失败</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="nodesTableBody">
+                <!-- Data rendered by JS -->
+              </tbody>
+            </table>
+            <div id="emptyState" style="display:none; text-align:center; padding: 40px; color: var(--text-muted);">暂无数据</div>
+          </div>
         </div>
       </div>
 
-      <div id="debugNodesContainer" class="nodes-grid"></div>
+      <!-- Manage Tab -->
+      <div id="manageTab" class="tab-content">
+        <div style="display:flex; justify-content:space-between; margin-bottom: 20px;">
+          <div>
+            <h2 style="font-size: 18px; margin-bottom: 4px;">配置管理</h2>
+            <p style="color: var(--text-muted); font-size: 12px;">修改配置后点击上方重载按钮生效</p>
+          </div>
+          <div style="display:flex; gap: 10px;">
+            <button class="btn btn-primary" onclick="showAddNodeModal()">➕ 添加节点</button>
+            <button class="btn btn-warning" onclick="triggerReload()" id="reloadBtn" style="color:#000;">⚡ 重载核心</button>
+          </div>
+        </div>
+        
+        <div id="subscriptionWarning" style="display:none; background: rgba(245, 158, 11, 0.1); border: 1px solid var(--warning); padding: 12px; border-radius: 6px; color: var(--warning); margin-bottom: 16px; font-size: 12px;">
+          ⚠️ 警告：当前使用订阅模式。手动修改配置将在下次订阅刷新时被覆盖。
+        </div>
 
-      <div id="debugEmptyState" class="empty" style="display: none;">
-        <svg width="48" height="48" viewBox="0 0 64 64" fill="none" opacity="0.2">
-          <circle cx="32" cy="32" r="30" stroke="currentColor" stroke-width="4"/>
-          <path d="M32 16v32M16 32h32" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
-        </svg>
-        <h3>暂无调试数据</h3>
-        <p>节点使用后将显示统计信息</p>
+        <div class="panel">
+          <div class="table-container">
+            <table>
+              <thead><tr><th>名称</th><th>URI</th><th>端口</th><th>来源</th><th>操作</th></tr></thead>
+              <tbody id="configNodesTableBody"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
-    </div><!-- end debugTab -->
-  </div>
 
-  <div id="toast" class="toast">
-    <span class="toast-message" id="toastMessage"></span>
-  </div>
+      <!-- Debug Tab -->
+      <div id="debugTab" class="tab-content">
+        <div class="overview-grid">
+          <div class="stat-panel">
+            <div class="stat-title">总调用次数</div>
+            <div class="stat-value" id="debugTotalCalls">0</div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">总成功次数</div>
+            <div class="stat-value" style="color: var(--success);" id="debugTotalSuccess">0</div>
+          </div>
+          <div class="stat-panel">
+            <div class="stat-title">全局成功率</div>
+            <div class="stat-value" style="color: var(--primary);" id="debugSuccessRate">0%</div>
+          </div>
+        </div>
 
-  <!-- 批量探测进度条 -->
-  <div id="probeProgress" class="probe-progress">
-    <div class="probe-progress-header">
-      <span class="probe-progress-title">⚡ 正在探测所有节点...</span>
-      <span class="probe-progress-stats" id="probeProgressStats">0 / 0</span>
-    </div>
-    <div class="probe-progress-bar">
-      <div class="probe-progress-fill" id="probeProgressFill"></div>
-    </div>
-    <div class="probe-progress-detail">
-      <span>成功: <span class="success" id="probeSuccessCount">0</span></span>
-      <span>失败: <span class="failed" id="probeFailedCount">0</span></span>
-      <span id="probeCurrentNode">准备中...</span>
-    </div>
-  </div>
+        <div class="charts-grid">
+          <div class="chart-panel">
+            <div class="chart-title">全局质量分数 (Overall Health Score)</div>
+            <div class="chart-container" id="successRateChart"></div>
+          </div>
+          <div class="chart-panel">
+            <div class="chart-title">稳定性掉线排行 (Top Unstable Nodes)</div>
+            <div class="chart-container" id="failureChart"></div>
+          </div>
+        </div>
 
-  <!-- 节点编辑弹窗 -->
-  <div id="nodeModalOverlay" class="login-overlay">
-    <div class="login-modal">
-      <div class="login-header">
-        <h2 id="nodeModalTitle">➕ 添加节点</h2>
-        <p id="nodeModalDesc">输入节点信息</p>
+        <div class="panel">
+          <div class="panel-header"><div class="panel-title">节点质量分析</div></div>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>节点</th>
+                  <th>成功率</th>
+                  <th>成功 / 失败</th>
+                  <th>连接</th>
+                  <th>最近调用时间线</th>
+                </tr>
+              </thead>
+              <tbody id="debugNodesTableBody"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
-      <form class="login-form" onsubmit="handleNodeSubmit(event)">
-        <div class="form-group">
-          <label class="form-label" for="nodeName">节点名称</label>
-          <input type="text" id="nodeName" class="form-input" placeholder="例如：香港节点" />
+
+      <!-- Logs Tab -->
+      <div id="logsTab" class="tab-content">
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">控制台日志 (Console Logs)</div>
+            <div style="display:flex; align-items:center; gap:12px;">
+              <label style="font-size:13px; color:var(--text-muted); display:flex; align-items:center; gap:6px;"><input type="checkbox" id="autoScrollLogs" checked> 自动滚动</label>
+              <button class="btn btn-sm" onclick="pollLogs()">↺ 刷新</button>
+            </div>
+          </div>
+          <div style="padding: 0;">
+            <textarea id="consoleLogs" readonly style="width:100%; height:calc(100vh - 220px); min-height:400px; background:var(--bg-input); color:var(--text-main); font-family:'JetBrains Mono',monospace; font-size:12px; line-height:1.7; border:none; border-top:1px solid var(--border); padding:16px; resize:none; box-sizing:border-box; white-space:pre; overflow-x:auto;"></textarea>
+          </div>
         </div>
-        <div class="form-group">
-          <label class="form-label" for="nodeUri">节点 URI <span style="color: var(--error);">*</span></label>
-          <input type="text" id="nodeUri" class="form-input" placeholder="vless://... 或 vmess://..." required />
+      </div>
+
+      <!-- Settings Tab -->
+      <div id="settingsTab" class="tab-content">
+        <div style="max-width: 800px; margin: 0 auto;">
+          <div style="font-size: 20px; font-weight: 700; margin-bottom: 24px; color: var(--text-main);">系统设置</div>
+          <form onsubmit="handleSettingsSave(event)">
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">基础配置</div></div>
+              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                <div class="form-group">
+                  <label>运行模式 (Mode)</label>
+                  <select id="settingMode" class="setting-input">
+                    <option value="pool">pool - 单端口负载池</option>
+                    <option value="multi-port">multi-port - 多端口模式</option>
+                    <option value="hybrid">hybrid - 混合模式</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>外部 IP (External IP)</label>
+                  <input type="text" id="settingExternalIP" class="setting-input" placeholder="0.0.0.0" />
+                </div>
+                <div class="form-group">
+                  <label>探测目标 (Probe Target)</label>
+                  <input type="text" id="settingProbeTarget" class="setting-input" placeholder="www.apple.com:80" />
+                </div>
+                <div class="form-group" style="justify-content:flex-end;">
+                  <label>&nbsp;</label>
+                  <div class="checkbox-row"><input type="checkbox" id="settingSkipCertVerify" /><label for="settingSkipCertVerify">跳过 SSL 证书验证</label></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">监听配置 (Listener)</div></div>
+              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                <div class="form-group"><label>监听地址</label><input type="text" id="settingListenerAddr" class="setting-input" placeholder="0.0.0.0" /></div>
+                <div class="form-group"><label>监听端口</label><input type="number" id="settingListenerPort" class="setting-input" min="1" max="65535" placeholder="7890" /></div>
+                <div class="form-group"><label>用户名 (可选)</label><input type="text" id="settingListenerUser" class="setting-input" /></div>
+                <div class="form-group"><label>密码 (可选)</label><input type="password" id="settingListenerPass" class="setting-input" /></div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">多端口配置 (Multi-Port)</div></div>
+              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                <div class="form-group"><label>监听地址</label><input type="text" id="settingMPAddr" class="setting-input" placeholder="0.0.0.0" /></div>
+                <div class="form-group"><label>起始端口</label><input type="number" id="settingMPBasePort" class="setting-input" min="1" max="65535" placeholder="10000" /></div>
+                <div class="form-group"><label>用户名 (可选)</label><input type="text" id="settingMPUser" class="setting-input" /></div>
+                <div class="form-group"><label>密码 (可选)</label><input type="password" id="settingMPPass" class="setting-input" /></div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">节点池配置 (Pool)</div></div>
+              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
+                <div class="form-group">
+                  <label>调度模式</label>
+                  <select id="settingPoolMode" class="setting-input">
+                    <option value="random">random - 随机</option>
+                    <option value="round-robin">round-robin - 轮询</option>
+                    <option value="balance">balance - 均衡</option>
+                  </select>
+                </div>
+                <div class="form-group"><label>故障阈值</label><input type="number" id="settingPoolFailure" class="setting-input" min="1" max="100" placeholder="3" /></div>
+                <div class="form-group"><label>黑名单时长</label><input type="text" id="settingPoolBlacklist" class="setting-input" placeholder="24h" /></div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">管理面板 (Management)</div></div>
+              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                <div class="form-group"><label>监听地址</label><input type="text" id="settingMgmtListen" class="setting-input" placeholder="0.0.0.0:8080" /></div>
+                <div class="form-group"><label>访问密码</label><input type="password" id="settingMgmtPassword" class="setting-input" /></div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">GeoIP 地域路由</div></div>
+              <div style="padding: 16px;">
+                <div class="checkbox-grid">
+                  <div class="checkbox-row"><input type="checkbox" id="settingGeoIPEnabled" /><label for="settingGeoIPEnabled">启用 GeoIP 地域路由</label></div>
+                  <div class="checkbox-row"><input type="checkbox" id="settingGeoIPAutoUpdate" /><label for="settingGeoIPAutoUpdate">自动更新数据库</label></div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                  <div class="form-group"><label>数据库路径</label><input type="text" id="settingGeoIPDBPath" class="setting-input" placeholder="./GeoLite2-Country.mmdb" /></div>
+                  <div class="form-group"><label>路由监听地址</label><input type="text" id="settingGeoIPListen" class="setting-input" /></div>
+                  <div class="form-group"><label>路由端口</label><input type="number" id="settingGeoIPPort" class="setting-input" min="1" max="65535" placeholder="1221" /></div>
+                  <div class="form-group"><label>更新间隔</label><input type="text" id="settingGeoIPUpdateInterval" class="setting-input" placeholder="24h" /></div>
+                </div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">首次启用会自动下载 GeoIP 数据库（约 9MB），需重载核心生效</div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">日志配置</div></div>
+              <div style="padding: 16px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                  <div class="form-group">
+                    <label>日志输出</label>
+                    <select id="settingLogOutput" class="setting-input" onchange="toggleLogFileSettings()">
+                      <option value="stdout">仅控制台 (stdout)</option>
+                      <option value="file">控制台 + 文件 (stdout + file)</option>
+                    </select>
+                  </div>
+                </div>
+                <div id="logFileSettings" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px;">
+                  <div class="form-group"><label>单文件最大 MB</label><input type="number" id="settingLogMaxSize" class="setting-input" min="1" max="1024" placeholder="50" /></div>
+                  <div class="form-group"><label>保留旧日志个数</label><input type="number" id="settingLogMaxBackups" class="setting-input" min="0" max="100" placeholder="3" /></div>
+                  <div class="form-group"><label>保留天数</label><input type="number" id="settingLogMaxAge" class="setting-input" min="0" max="365" placeholder="7" /></div>
+                  <div class="form-group" style="justify-content:flex-end;">
+                    <label>&nbsp;</label>
+                    <div class="checkbox-row"><input type="checkbox" id="settingLogCompress" /><label for="settingLogCompress">压缩旧日志</label></div>
+                  </div>
+                </div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">日志设置需重启服务生效</div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">订阅配置</div></div>
+              <div style="padding: 16px;">
+                <div class="checkbox-grid">
+                  <div class="checkbox-row"><input type="checkbox" id="settingSubEnabled" /><label for="settingSubEnabled">启用订阅自动刷新</label></div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                  <div class="form-group">
+                    <label>刷新间隔</label>
+                    <select id="settingSubInterval" class="setting-input">
+                      <option value="10m">10 分钟</option><option value="30m">30 分钟</option>
+                      <option value="1h">1 小时</option><option value="3h">3 小时</option>
+                      <option value="6h">6 小时</option><option value="12h">12 小时</option>
+                      <option value="24h">24 小时</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="form-group" style="margin-top: 12px;">
+                  <label>订阅链接 (每行一个 URL)</label>
+                  <textarea id="settingSubURLs" rows="4" class="setting-input" placeholder="https://example.com/subscribe?token=xxx" style="resize:vertical; font-size:12px;"></textarea>
+                </div>
+                <div style="font-size: 11px; color: var(--success); margin-top: 8px;">订阅配置变更保存后立即生效</div>
+              </div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 12px; padding: 8px 0 24px;">
+              <button type="submit" class="btn btn-primary" style="padding: 10px 32px; font-size: 14px;">保存配置</button>
+            </div>
+          </form>
         </div>
-        <div class="form-group">
-          <label class="form-label" for="nodePort">端口 (可选，Multi-Port 模式自动分配)</label>
-          <input type="number" id="nodePort" class="form-input" placeholder="留空自动分配" min="1" max="65535" />
+      </div>
+
+    </div>
+  </main>
+
+  <!-- Modals -->
+  <!-- Auth Modal -->
+  <div class="modal-overlay" id="loginOverlay">
+    <div class="modal">
+      <div class="modal-header">身份验证</div>
+      <form onsubmit="handleLogin(event)">
+        <div class="modal-body">
+          <div class="form-group">
+            <label>系统密码</label>
+            <input type="password" id="password" required placeholder="Enter password..." />
+          </div>
+          <div id="loginError" style="color: var(--error); font-size: 12px; display: none;"></div>
         </div>
-        <input type="hidden" id="nodeEditName" />
-        <div id="nodeModalError" class="login-error"></div>
-        <div class="modal-buttons">
-          <button type="button" class="btn btn-secondary" onclick="hideNodeModal()">取消</button>
-          <button type="submit" class="btn btn-primary" id="nodeSubmitBtn">添加</button>
+        <div class="modal-footer">
+          <button type="submit" class="btn btn-primary">验证授权</button>
         </div>
       </form>
     </div>
   </div>
 
-  <!-- 设置弹窗 -->
-  <div id="settingsOverlay" class="login-overlay">
-    <div class="login-modal">
-      <div class="login-header">
-        <h2>⚙️ 系统设置</h2>
-        <p>配置全局选项</p>
-      </div>
-      <form class="login-form" onsubmit="handleSettingsSave(event)">
-        <div class="form-group">
-          <label class="form-label" for="settingExternalIP">外部 IP 地址</label>
-          <input type="text" id="settingExternalIP" class="form-input" placeholder="例如：1.2.3.4 或 example.com" />
-          <p class="form-help">导出节点时用于替换 0.0.0.0，留空则使用默认地址</p>
+  <!-- Settings Modal -->
+  <!-- Node Edit Modal -->
+  <div class="modal-overlay" id="nodeModalOverlay">
+    <div class="modal">
+      <div class="modal-header" id="nodeModalTitle">节点配置</div>
+      <form onsubmit="handleNodeSubmit(event)">
+        <div class="modal-body">
+          <div class="form-group">
+            <label>节点名称 Name</label>
+            <input type="text" id="nodeName" placeholder="HK-01" />
+          </div>
+          <div class="form-group">
+            <label>节点 URI</label>
+            <input type="text" id="nodeUri" required placeholder="vless://... 或 anytls://..." />
+          </div>
+          <div class="form-group">
+            <label>映射端口 (可选)</label>
+            <input type="number" id="nodePort" placeholder="0" />
+          </div>
+          <input type="hidden" id="nodeEditName" />
         </div>
-        <div class="form-group">
-          <label class="form-label" for="settingProbeTarget">探测目标</label>
-          <input type="text" id="settingProbeTarget" class="form-input" placeholder="例如：www.apple.com:80" />
-          <p class="form-help">健康检查时使用的目标地址，格式：host:port</p>
-        </div>
-        <div class="form-group" style="display: flex; align-items: center; gap: 12px;">
-          <label class="form-label" for="settingSkipCertVerify" style="margin: 0; flex: 1;">跳过 SSL 证书验证</label>
-          <label class="toggle-switch">
-            <input type="checkbox" id="settingSkipCertVerify" />
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <p class="form-help" style="margin-top: -8px;">启用后所有节点将忽略 SSL 证书错误，修改后需重载生效</p>
-        <div id="settingsError" class="login-error"></div>
-        <div class="modal-buttons">
-          <button type="button" class="btn btn-secondary" onclick="hideSettingsModal()">取消</button>
-          <button type="submit" class="btn btn-primary">保存</button>
+        <div class="modal-footer">
+          <button type="button" class="btn" onclick="document.getElementById('nodeModalOverlay').classList.remove('show')">取消</button>
+          <button type="submit" class="btn btn-primary" id="nodeSubmitBtn">保存</button>
         </div>
       </form>
     </div>
   </div>
 
-  <!-- 登录弹窗 -->
-  <div id="loginOverlay" class="login-overlay">
-    <div class="login-modal">
-      <div class="login-header">
-        <h2>🔐 身份验证</h2>
-        <p>请输入访问密码</p>
+
+
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Full-screen Loading Overlay -->
+  <div id="fullscreenLoading" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,0.5); backdrop-filter:blur(4px); display:none; align-items:center; justify-content:center;">
+    <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:32px 48px; text-align:center; box-shadow:0 8px 32px rgba(0,0,0,0.3);">
+      <div style="margin-bottom:16px;">
+        <svg width="40" height="40" viewBox="0 0 40 40" style="animation:spin 1s linear infinite;">
+          <circle cx="20" cy="20" r="16" fill="none" stroke="var(--border)" stroke-width="3"/>
+          <circle cx="20" cy="20" r="16" fill="none" stroke="var(--primary)" stroke-width="3" stroke-dasharray="80" stroke-dashoffset="60" stroke-linecap="round"/>
+        </svg>
       </div>
-      <form class="login-form" onsubmit="handleLogin(event)">
-        <div class="form-group">
-          <label class="form-label" for="password">密码</label>
-          <input
-            type="password"
-            id="password"
-            class="form-input"
-            placeholder="请输入密码"
-            autocomplete="current-password"
-            required
-          />
-        </div>
-        <div id="loginError" class="login-error">密码错误，请重试</div>
-        <button type="submit" class="btn btn-primary" style="width: 100%;">
-          登录
-        </button>
-      </form>
+      <div id="fullscreenLoadingText" style="font-size:15px; font-weight:600; color:var(--text-main);">处理中...</div>
+      <div id="fullscreenLoadingSubtext" style="font-size:12px; color:var(--text-muted); margin-top:6px;"></div>
     </div>
   </div>
+  <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
 
   <script>
-    let autoRefreshInterval = null;
+    // JS Logic - Kept exact API calls from original
     let isAutoRefresh = true;
-    let isAuthenticated = false;
+    let autoRefreshInterval = null;
+    let allNodesCache = [];
+    let currentRegionFilter = 'all';
+    let isEditMode = false;
+    let configNodes = [];
+    let _savedSubSnapshot = '';
+    let _savedCoreSnapshot = '';
 
-    // 检查是否需要登录
+    function showFullscreenLoading(text, subtext) {
+      document.getElementById('fullscreenLoadingText').textContent = text || '处理中...';
+      document.getElementById('fullscreenLoadingSubtext').textContent = subtext || '';
+      const el = document.getElementById('fullscreenLoading');
+      el.style.display = 'flex';
+    }
+    function hideFullscreenLoading() {
+      document.getElementById('fullscreenLoading').style.display = 'none';
+    }
+
+    // Chart instances
+    let regionChartInst = null;
+    let latencyChartInst = null;
+    let successRateChartInst = null;
+    let failureChartInst = null;
+    let trafficChartInst = null;
+    let trafficSource = null;
+    let trafficDataUp = [];
+    let trafficDataDown = [];
+    let trafficTime = [];
+
+    // Resize observer for charts
+    window.addEventListener('resize', () => {
+      regionChartInst && regionChartInst.resize();
+      latencyChartInst && latencyChartInst.resize();
+      successRateChartInst && successRateChartInst.resize();
+      failureChartInst && failureChartInst.resize();
+      trafficChartInst && trafficChartInst.resize();
+    });
+
+    const EMOJIS = { jp: '🇯🇵', kr: '🇰🇷', us: '🇺🇸', hk: '🇭🇰', tw: '🇹🇼', sg: '🇸🇬', other: '🌍' };
+
+    function showToast(msg, type='success') {
+      const c = document.getElementById('toastContainer');
+      const t = document.createElement('div');
+      t.className = `toast ${type}`; t.textContent = msg;
+      c.appendChild(t);
+      setTimeout(() => { t.style.opacity=0; setTimeout(()=>t.remove(),300); }, 3000);
+    }
+
     async function checkAuth() {
       try {
         const res = await fetch('/api/nodes');
-        if (res.status === 401) {
-          // 需要登录
-          document.getElementById('loginOverlay').classList.add('show');
-          return false;
-        }
+        if (res.status === 401) { document.getElementById('loginOverlay').classList.add('show'); return false; }
         return true;
-      } catch (err) {
-        console.error('检查认证状态失败:', err);
-        return false;
-      }
+      } catch (e) { return false; }
     }
 
-    // 处理登录
-    async function handleLogin(event) {
-      event.preventDefault();
-      const password = document.getElementById('password').value;
-      const loginError = document.getElementById('loginError');
-
-      loginError.classList.remove('show');
-
+    async function handleLogin(e) {
+      e.preventDefault();
+      const pwd = document.getElementById('password').value;
+      const err = document.getElementById('loginError');
       try {
-        const res = await fetch('/api/auth', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password })
-        });
+        const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password:pwd})});
+        if (res.ok) { document.getElementById('loginOverlay').classList.remove('show'); refresh(); }
+        else { err.textContent = 'Auth Failed'; err.style.display = 'block'; }
+      } catch (ex) { err.textContent = ex.message; err.style.display = 'block'; }
+    }
 
-        const data = await res.json();
-
-        if (res.ok) {
-          isAuthenticated = true;
-          document.getElementById('loginOverlay').classList.remove('show');
-          showToast('登录成功！', 'success');
-          refresh();
-        } else {
-          loginError.textContent = data.error || '登录失败';
-          loginError.classList.add('show');
-        }
-      } catch (err) {
-        loginError.textContent = '登录失败: ' + err.message;
-        loginError.classList.add('show');
+    function switchTab(name) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+      document.getElementById(`${name}Tab`).classList.add('active');
+      document.querySelector(`.nav-item[onclick="switchTab('${name}')"]`).classList.add('active');
+      if (name === 'dashboard') {
+        setTimeout(updateDashboardCharts, 100);
       }
-    }
-
-    // 导出节点
-    async function exportNodes() {
-      try {
-        const res = await fetch('/api/export');
-        if (res.status === 401) {
-          showToast('请先登录', 'error');
-          document.getElementById('loginOverlay').classList.add('show');
-          return;
-        }
-        if (!res.ok) {
-          throw new Error('导出失败');
-        }
-
-        const blob = await res.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'nodes.txt';
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(url);
-        document.body.removeChild(a);
-
-        showToast('节点导出成功！', 'success');
-      } catch (err) {
-        showToast('导出失败: ' + err.message, 'error');
+      if (name === 'manage') loadConfigNodes();
+      if (name === 'debug') {
+        loadDebugData();
+        setTimeout(updateDebugCharts, 100);
       }
+      if (name === 'logs') {
+        startLogPolling();
+      } else {
+        stopLogPolling();
+      }
+      if (name === 'settings') loadSettingsPage();
     }
 
-    function formatTime(timeStr) {
-      if (!timeStr || timeStr === '0001-01-01T00:00:00Z') return '从未';
-      const date = new Date(timeStr);
-      const now = new Date();
-      const diff = Math.floor((now - date) / 1000);
-      if (diff < 60) return `${diff}秒前`;
-      if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`;
-      if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`;
-      return `${Math.floor(diff / 86400)}天前`;
+    function toggleAutoRefresh() {
+      isAutoRefresh = !isAutoRefresh;
+      document.getElementById('autoRefreshBtn').textContent = isAutoRefresh ? '⏹ 关闭自动刷新' : '▶ 开启自动刷新';
+      if(isAutoRefresh) startAutoRefresh(); else stopAutoRefresh();
+    }
+    function startAutoRefresh() { if(!autoRefreshInterval) autoRefreshInterval = setInterval(()=> { if(!document.hidden && document.getElementById('dashboardTab').classList.contains('active')) refresh(); }, 10000); }
+    function stopAutoRefresh() { clearInterval(autoRefreshInterval); autoRefreshInterval = null; }
+
+    function getQualityWidth(ms) {
+      if(ms < 0) return 0; if(ms > 1000) return 100;
+      return (ms/1000)*100;
+    }
+    function getQualityColor(ms) {
+      if(ms < 0) return 'transparent';
+      if(ms < 100) return 'var(--success)';
+      if(ms < 200) return 'var(--primary)';
+      if(ms < 500) return 'var(--warning)';
+      return 'var(--error)';
+    }
+    function formatTime(ts) {
+      if(tsc || ts==='0001-01-01T00:00:00Z') return '-';
+      return new Date(ts).toLocaleTimeString();
     }
 
-    function getLatencyQuality(ms) {
-      if (ms < 0) return { text: '未测试', color: 'var(--text-secondary)' };
-      if (ms < 100) return { text: '优秀', color: 'var(--success)' };
-      if (ms < 200) return { text: '良好', color: 'var(--primary)' };
-      if (ms < 500) return { text: '一般', color: 'var(--warning)' };
-      return { text: '较慢', color: 'var(--error)' };
-    }
-
-    function getNodeStatus(node) {
-      if (node.blacklisted) return 'blacklisted';
-      if (node.failure_count >= 2) return 'error';
-      if (node.failure_count >= 1) return 'warning';
-      return 'healthy';
-    }
-
-    function getStatusText(status) {
-      const map = {
-        'healthy': '健康',
-        'warning': '警告',
-        'error': '异常',
-        'blacklisted': '已拉黑'
-      };
-      return map[status] || '未知';
-    }
-
-    function showToast(message, type = 'success') {
-      const toast = document.getElementById('toast');
-      const toastMessage = document.getElementById('toastMessage');
-      toast.className = `toast ${type} show`;
-      toastMessage.textContent = message;
-      setTimeout(() => toast.classList.remove('show'), 3000);
+    function escapeHtml(text) {
+      if(!text) return '';
+      const div = document.createElement('div'); div.textContent = text; return div.innerHTML;
     }
 
     async function refresh() {
       try {
         const res = await fetch('/api/nodes');
-        if (res.status === 401) {
-          // 需要登录
-          isAuthenticated = false;
-          document.getElementById('loginOverlay').classList.add('show');
-          stopAutoRefresh();
-          return;
-        }
-        if (!res.ok) throw new Error('请求失败');
+        if (res.status === 401) { document.getElementById('loginOverlay').classList.add('show'); stopAutoRefresh(); return; }
         const data = await res.json();
-        render(data.nodes || []);
-        updateStats(data);
-        document.getElementById('lastUpdate').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN')}`;
-      } catch (err) {
-        showToast('刷新失败: ' + err.message, 'error');
+        allNodesCache = data.nodes || [];
+        updateDashboardStats(data);
+        filterByRegion(currentRegionFilter);
+        document.getElementById('lastUpdate').textContent = `Sync: ${new Date().toLocaleTimeString()}`;
+        fetchSubscriptionStatus();
+      } catch(e) {}
+    }
+
+    function updateDashboardStats(data) {
+      document.getElementById('totalNodes').textContent = data.total_nodes || allNodesCache.length;
+      document.getElementById('healthyNodes').textContent = allNodesCache.filter(n => !n.blacklisted && n.initial_check_done && n.available).length;
+      document.getElementById('activeConnections').textContent = allNodesCache.reduce((s, n) => s + (n.active_connections||0), 0);
+      document.getElementById('blacklistedNodes').textContent = allNodesCache.filter(n => n.blacklisted || (!n.available && n.initial_check_done)).length;
+      
+      if(document.getElementById('dashboardTab').classList.contains('active')) {
+        updateDashboardCharts();
       }
     }
 
-    function updateStats(payload) {
-      payload = payload || {};
-      const nodes = payload.nodes || [];
-      const totalNodesRaw = Number(payload.total_nodes);
-      const totalNodes = Number.isFinite(totalNodesRaw) ? totalNodesRaw : nodes.length;
-      document.getElementById('totalNodes').textContent = totalNodes;
-      document.getElementById('healthyNodes').textContent = nodes.filter(n => !n.blacklisted && n.initial_check_done && n.available).length;
-      document.getElementById('activeConnections').textContent = nodes.reduce((sum, n) => sum + (n.active_connections || 0), 0);
-      document.getElementById('blacklistedNodes').textContent = nodes.filter(n => n.blacklisted).length;
+    function initEchart(id) {
+      const el = document.getElementById(id);
+      if(!el) return null;
+      let chart = echarts.getInstanceByDom(el);
+      if(!chart) chart = echarts.init(el, null, { renderer: 'canvas' });
+      return chart;
+    }
 
-      // Update region statistics
-      const regionStats = payload.region_stats || {};
-      const regionHealthy = payload.region_healthy || {};
-      const hasRegionData = Object.keys(regionStats).length > 0;
+    function getCssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
-      // Show/hide region stats section
-      const regionStatsEl = document.getElementById('regionStats');
-      const regionFilterEl = document.getElementById('regionFilter');
-      if (hasRegionData) {
-        regionStatsEl.style.display = 'grid';
-        regionFilterEl.style.display = 'flex';
+    function updateDashboardCharts() {
+      if(!regionChartInst) regionChartInst = initEchart('regionChart');
+      if(!latencyChartInst) latencyChartInst = initEchart('latencyChart');
 
-        // Update each region
-        const regions = ['jp', 'kr', 'us', 'hk', 'tw', 'other'];
-        regions.forEach(region => {
-          const count = regionStats[region] || 0;
-          const healthy = regionHealthy[region] || 0;
-          const valueEl = document.getElementById('region' + region.toUpperCase());
-          const healthyEl = document.getElementById('region' + region.toUpperCase() + 'Healthy');
-          if (valueEl) valueEl.textContent = count;
-          if (healthyEl) healthyEl.textContent = healthy + ' 健康';
+      if (!allNodesCache || allNodesCache.length === 0) return;
+
+      // 1. Region Chart Data
+      const regionStats = {};
+      allNodesCache.forEach(n => {
+        const r = (n.region || 'other').toUpperCase();
+        if(!regionStats[r]) regionStats[r] = { total: 0, healthy: 0 };
+        regionStats[r].total++;
+        if(!n.blacklisted && n.initial_check_done && n.available) {
+          regionStats[r].healthy++;
+        }
+      });
+      
+      const regionData = Object.keys(regionStats).map(k => ({
+        name: k,
+        value: regionStats[k].total,
+        itemStyle: { color: regionStats[k].healthy === 0 ? '#ef4444' : (regionStats[k].healthy < regionStats[k].total ? '#f59e0b' : '#3b82f6') }
+      }));
+
+      regionChartInst && regionChartInst.setOption({
+        backgroundColor: 'transparent',
+        tooltip: { trigger: 'item',
+          backgroundColor: getCssVar('--bg-panel'), borderColor: getCssVar('--border'), textStyle: { color: getCssVar('--text-main') },
+          formatter: (params) => {
+             const stat = regionStats[params.name];
+             return `${params.name} Region<br/>Total Node: ${stat.total}<br/>Available: ${stat.healthy}`;
+          }
+        },
+        legend: { top: 'bottom', textStyle: { color: getCssVar('--text-muted') } },
+        series: [{
+          name: 'Regions', type: 'pie', radius: ['40%', '70%'], center: ['50%', '55%'],
+          itemStyle: { borderRadius: 10, borderColor: getCssVar('--bg-panel'), borderWidth: 2 },
+          label: { show: false, position: 'center' },
+          emphasis: { label: { show: true, fontSize: '20', fontWeight: 'bold', color: getCssVar('--text-main') } },
+          data: regionData
+        }]
+      });
+
+      // 2. Latency Chart Data
+      const sorted = allNodesCache.filter(n => n.last_latency_ms > 0 && !n.blacklisted).sort((a,b) => a.last_latency_ms - b.last_latency_ms).slice(0, 10);
+      const latencyX = sorted.map(n => n.name || n.tag);
+      const latencyY = sorted.map(n => n.last_latency_ms);
+
+      latencyChartInst && latencyChartInst.setOption({
+        backgroundColor: 'transparent',
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: getCssVar('--bg-panel'), borderColor: getCssVar('--border'), textStyle: { color: getCssVar('--text-main') } },
+        grid: { left: '3%', right: '4%', bottom: '5%', top: '25%', containLabel: true },
+        xAxis: { type: 'value', splitLine: { lineStyle: { color: getCssVar('--border'), type: 'dashed' } }, axisLabel: { color: getCssVar('--text-muted'), formatter: '{value} ms' } },
+        yAxis: { type: 'category', data: latencyX.reverse(), axisLabel: { color: getCssVar('--text-muted'), width: 90, overflow: 'truncate' } },
+        series: [{
+          name: 'Latency', type: 'bar', data: latencyY.reverse(),
+          itemStyle: {
+            color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [
+              { offset: 0, color: '#10b981' },
+              { offset: 1, color: '#3b82f6' }
+            ]),
+            borderRadius: [0, 4, 4, 0]
+          }
+        }]
+      });
+
+      // 3. Traffic Chart
+      if(!trafficChartInst) {
+        trafficChartInst = initEchart('trafficChart');
+        trafficChartInst.setOption({
+          backgroundColor: 'transparent',
+          tooltip: { trigger: 'axis', backgroundColor: getCssVar('--bg-panel'), borderColor: getCssVar('--border'), textStyle: { color: getCssVar('--text-main') },
+            formatter: function(p) {
+              return p[0].axisValue + '<br/>' + p.map(s => s.marker + s.seriesName + ': ' + formatBytes(s.value) + '/s').join('<br/>');
+            }
+          },
+          legend: { top: 'bottom', textStyle: { color: getCssVar('--text-muted') } },
+          grid: { left: '4%', right: '4%', bottom: '15%', top: '15%', containLabel: true },
+          xAxis: { type: 'category', boundaryGap: false, data: trafficTime, axisLine: { lineStyle: { color: getCssVar('--border') } }, axisLabel: { color: getCssVar('--text-muted') } },
+          yAxis: { type: 'value', splitLine: { lineStyle: { color: getCssVar('--border'), type: 'dashed' } }, axisLabel: { color: getCssVar('--text-muted'), formatter: (v) => formatBytes(v) + '/s' } },
+          series: [
+            { name: 'Up', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 2, color: '#3b82f6' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(59,130,246,0.5)'}, {offset: 1, color: 'rgba(59,130,246,0)'}]) }, data: trafficDataUp },
+            { name: 'Down', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 2, color: '#10b981' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{offset: 0, color: 'rgba(16,185,129,0.5)'}, {offset: 1, color: 'rgba(16,185,129,0)'}]) }, data: trafficDataDown }
+          ]
         });
-      } else {
-        regionStatsEl.style.display = 'none';
-        regionFilterEl.style.display = 'none';
+        connectTrafficSSE(); // connect SSE on init
       }
     }
 
-    // Region filter state
-    let currentRegionFilter = 'all';
-    let allNodesCache = [];
+    function formatBytes(bytes, decimals = 2) {
+      if (!bytes || isNaN(bytes) || bytes <= 0) return '0 B';
+      const k = 1024;
+      const dm = decimals < 0 ? 0 : decimals;
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      if (bytes < k) return parseFloat(bytes.toFixed(dm)) + ' B';
+      
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      const safeI = Math.min(i, sizes.length - 1);
+      return parseFloat((bytes / Math.pow(k, safeI)).toFixed(dm)) + ' ' + sizes[safeI];
+    }
+
+    function connectTrafficSSE() {
+      if (trafficSource) return;
+      trafficSource = new EventSource('/api/traffic');
+      trafficSource.onmessage = function(e) {
+        try {
+          const d = JSON.parse(e.data);
+          const up = d.up || 0;
+          const down = d.down || 0;
+          const now = new Date().toLocaleTimeString([], {hour12: false});
+          trafficTime.push(now);
+          trafficDataUp.push(up);
+          trafficDataDown.push(down);
+          
+          if (trafficTime.length > 60) { trafficTime.shift(); trafficDataUp.shift(); trafficDataDown.shift(); }
+          
+          // Update live speed stat panels
+          document.getElementById('liveUpSpeed').textContent = formatBytes(up) + '/s';
+          document.getElementById('liveDownSpeed').textContent = formatBytes(down) + '/s';
+          
+          if(trafficChartInst) {
+            trafficChartInst.setOption({ xAxis: { data: trafficTime }, series: [{ data: trafficDataUp }, { data: trafficDataDown }] });
+          }
+        } catch(err){}
+      };
+      trafficSource.onerror = function() {
+        trafficSource.close();
+        trafficSource = null;
+        setTimeout(connectTrafficSSE, 5000);
+      };
+    }
 
     function filterByRegion(region) {
       currentRegionFilter = region;
-
-      // Update button states
-      document.querySelectorAll('.region-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.region === region);
-      });
-
-      // Update region card states
-      document.querySelectorAll('.region-card').forEach(card => {
-        card.classList.toggle('active', card.dataset.region === region);
-      });
-
-      // Filter and re-render nodes
-      if (allNodesCache.length > 0) {
-        const filtered = region === 'all'
-          ? allNodesCache
-          : allNodesCache.filter(n => (n.region || 'other') === region);
-        renderNodes(filtered);
-      }
-    }
-
-    // Helper to get region emoji
-    function getRegionEmoji(region) {
-      const emojis = {
-        'jp': '🇯🇵',
-        'kr': '🇰🇷',
-        'us': '🇺🇸',
-        'hk': '🇭🇰',
-        'tw': '🇹🇼',
-        'other': '🌍'
-      };
-      return emojis[region] || '🌍';
-    }
-
-    // Helper to get region name
-    function getRegionName(region) {
-      const names = {
-        'jp': 'JP',
-        'kr': 'KR',
-        'us': 'US',
-        'hk': 'HK',
-        'tw': 'TW',
-        'other': 'Other'
-      };
-      return names[region] || 'Other';
-    }
-
-    function render(nodes) {
-      // Cache all nodes for filtering
-      allNodesCache = nodes;
-
-      // Apply current region filter
-      const filteredNodes = currentRegionFilter === 'all'
-        ? nodes
-        : nodes.filter(n => (n.region || 'other') === currentRegionFilter);
-
-      renderNodes(filteredNodes);
+      document.querySelectorAll('.region-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.region === region));
+      const flt = region === 'all' ? allNodesCache : allNodesCache.filter(n => (n.region||'other') === region);
+      renderNodes(flt);
     }
 
     function renderNodes(nodes) {
-      const container = document.getElementById('nodesContainer');
-      const emptyState = document.getElementById('emptyState');
+      const tbody = document.getElementById('nodesTableBody');
+      if (!nodes.length) { tbody.innerHTML = ''; document.getElementById('emptyState').style.display='block'; return;}
+      document.getElementById('emptyState').style.display='none';
+      tbody.innerHTML = nodes.map(n => {
+        const ms = n.last_latency_ms || -1;
+        let badge = '', statusText = '';
+        if (n.blacklisted) { badge = 'badge-error'; statusText = '拉黑 Blocked'; }
+        else if (ms < 0) { badge = 'badge-offline'; statusText = '未测试 Unknown'; }
+        else if (n.failure_count >= 1) { badge = 'badge-error'; statusText = '异常 Error'; }
+        else { badge = 'badge-healthy'; statusText = '在线 Healthy'; }
 
-      if (nodes.length === 0) {
-        container.innerHTML = '';
-        emptyState.style.display = 'block';
-        return;
-      }
-
-      emptyState.style.display = 'none';
-      container.innerHTML = nodes.map(node => {
-        const status = getNodeStatus(node);
-        const latency = node.last_latency_ms || -1;
-        const quality = getLatencyQuality(latency);
-        const region = node.region || 'other';
-        const regionBadge = node.region ? `<span class="region-badge">${getRegionEmoji(region)} ${getRegionName(region)}</span>` : '';
-
-        const latencyDisplay = latency >= 0 ? latency + 'ms' : '--';
-        const latencyClass = latency < 0 ? 'muted' : (latency < 100 ? 'success' : (latency < 200 ? 'primary' : (latency < 500 ? 'warning' : 'error')));
-
-        return `
-          <div class="node-card ${status}" data-region="${region}">
-            <div class="node-header">
-              <div class="node-info">
-                <div class="node-name">${escapeHtml(node.name || node.tag)}${regionBadge}</div>
-                <div class="node-tag">${escapeHtml(node.tag)}${node.country ? ` · ${escapeHtml(node.country)}` : ''}</div>
-              </div>
-              <span class="status-badge ${status}">
-                <span class="status-icon"></span>
-                ${getStatusText(status)}
-              </span>
+        return `<tr>
+          <td><span class="badge ${badge}">${statusText}</span></td>
+          <td>${EMOJIS[n.region||'other']} ${(n.region||'other').toUpperCase()}</td>
+          <td>
+            <div style="font-weight: 500">${escapeHtml(n.name || n.tag)}</div>
+            <div style="font-size: 11px; color: var(--text-muted)">${escapeHtml(n.tag)}</div>
+          </td>
+          <td class="tt-mono">${n.port || '-'}</td>
+          <td>
+            <div style="display:flex; align-items:center;">
+              <span class="tt-mono" style="width:40px">${ms>=0 ? ms+'ms' : '-'}</span>
+              <div class="lat-bar"><div class="lat-fill" style="width:${getQualityWidth(ms)}%; background:${getQualityColor(ms)}"></div></div>
             </div>
-
-            <div class="metrics-row">
-              <div class="metric-cell">
-                <div class="m-label">端口</div>
-                <div class="m-value">${node.port || '--'}</div>
-              </div>
-              <div class="metric-cell">
-                <div class="m-label">延迟</div>
-                <div class="m-value ${latencyClass}">${latencyDisplay}</div>
-              </div>
-              <div class="metric-cell">
-                <div class="m-label">连接</div>
-                <div class="m-value success">${node.active_connections || 0}</div>
-              </div>
-              <div class="metric-cell">
-                <div class="m-label">失败</div>
-                <div class="m-value ${node.failure_count > 0 ? 'error' : ''}">${node.failure_count || 0}</div>
-              </div>
-              <div class="metric-cell">
-                <div class="m-label">模式</div>
-                <div class="m-value muted">${node.mode || '--'}</div>
-              </div>
-            </div>
-
-            <div class="node-footer">
-              <div class="time-info">
-                <div>✓ ${formatTime(node.last_success)}</div>
-                <div>✗ ${formatTime(node.last_failure)}</div>
-                ${node.blacklisted ? `<div style="color: var(--error);">⚠ 拉黑至 ${new Date(node.blacklisted_until).toLocaleString('zh-CN')}</div>` : ''}
-              </div>
-              <button class="btn btn-secondary btn-sm" onclick="probe('${escapeHtml(node.tag)}')">
-                🔍 探测
-              </button>
-              ${node.blacklisted ? `
-                <button class="btn btn-primary btn-sm" onclick="release('${escapeHtml(node.tag)}')">
-                  解除拉黑
-                </button>
-              ` : ''}
-            </div>
-          </div>
-        `;
+          </td>
+          <td class="tt-mono">${n.active_connections||0}</td>
+          <td class="tt-mono" style="color: ${n.failure_count>0 ? 'var(--error)' : 'inherit'}">${n.failure_count||0}</td>
+          <td>
+            <button class="btn btn-sm" onclick="probeNode('${escapeHtml(n.tag)}')">探测</button>
+            ${n.blacklisted ? `<button class="btn btn-sm btn-primary" onclick="releaseNode('${escapeHtml(n.tag)}')">解封</button>` : `<button class="btn btn-sm btn-danger" onclick="blacklistNode('${escapeHtml(n.tag)}')">拉黑</button>`}
+          </td>
+        </tr>`;
       }).join('');
     }
 
-    async function probe(tag) {
+    async function probeNode(tag) {
+      showToast('探测中...');
       try {
-        showToast('正在探测节点 ' + tag + '...', 'success');
-        const res = await fetch('/api/nodes/' + encodeURIComponent(tag) + '/probe', { method: 'POST' });
-        const data = await res.json();
-        if (data.error) {
-          showToast('探测失败: ' + data.error, 'error');
-        } else {
-          showToast(`探测成功！延迟: ${data.latency_ms}ms`, 'success');
-        }
-        setTimeout(refresh, 500);
-      } catch (err) {
-        showToast('探测失败: ' + err.message, 'error');
-      }
+        const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/probe', {method:'POST'});
+        const d = await r.json();
+        if(d.error) showToast(d.error, 'error'); else { showToast(`Latency: ${d.latency_ms}ms`); refresh(); }
+      } catch(e) { showToast(e.message, 'error'); }
+    }
+    
+    async function releaseNode(tag) {
+      try {
+        const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/release', {method:'POST'});
+        showToast('已解封'); refresh();
+      } catch(e) { }
     }
 
-    // 批量探测所有节点
+    async function blacklistNode(tag) {
+      if(!confirm('确定拉黑该节点 24 小时？')) return;
+      try {
+        const r = await fetch('/api/nodes/'+encodeURIComponent(tag)+'/blacklist', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({duration:'24h'})});
+        const d = await r.json();
+        if(d.error) showToast(d.error, 'error'); else { showToast(d.message); refresh(); }
+      } catch(e) { showToast('拉黑失败', 'error'); }
+    }
+
+    // Probe All
     let isProbing = false;
     async function probeAllNodes() {
-      if (isProbing) {
-        showToast('探测正在进行中...', 'error');
-        return;
-      }
-
-      isProbing = true;
-      const btn = document.getElementById('probeAllBtn');
-      btn.disabled = true;
-      btn.textContent = '探测中...';
-
-      // 显示进度条
-      const progressEl = document.getElementById('probeProgress');
-      const progressFill = document.getElementById('probeProgressFill');
-      const progressStats = document.getElementById('probeProgressStats');
-      const successCount = document.getElementById('probeSuccessCount');
-      const failedCount = document.getElementById('probeFailedCount');
-      const currentNode = document.getElementById('probeCurrentNode');
-
-      progressEl.classList.add('show');
-      progressFill.style.width = '0%';
-      progressStats.textContent = '0 / 0';
-      successCount.textContent = '0';
-      failedCount.textContent = '0';
-      currentNode.textContent = '准备中...';
-
+      if(isProbing) return; isProbing = true;
+      document.getElementById('probeProgress').classList.add('show');
+      document.getElementById('probeProgressFill').style.width = '0%';
+      let total = 0, current = 0, suc = 0, fail = 0;
       try {
-        const response = await fetch('/api/nodes/probe-all', { method: 'POST' });
-        const reader = response.body.getReader();
+        const res = await fetch('/api/nodes/probe-all', { method: 'POST' });
+        const reader = res.body.getReader();
         const decoder = new TextDecoder();
-
-        let buffer = '';
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                handleProbeEvent(data);
-              } catch (e) {
-                console.error('Parse error:', e);
-              }
+        let buf = '';
+        while(true) {
+          const {done, value} = await reader.read();
+          if(done) break;
+          buf += decoder.decode(value, {stream:true});
+          const lines = buf.split('\n');
+          buf = lines.pop() || '';
+          for(const line of lines) {
+            if(line.startsWith('data: ')) {
+               try {
+                 const d = JSON.parse(line.slice(6));
+                 if(d.type === 'start') { total = d.total; }
+                 else if(d.type === 'progress') {
+                   current = d.current;
+                   if(d.error) fail++; else suc++;
+                   document.getElementById('probeProgressFill').style.width = `${d.progress}%`;
+                   document.getElementById('probeStats').textContent = `${current}/${total}`;
+                   document.getElementById('probeSuccess').textContent = suc;
+                   document.getElementById('probeFail').textContent = fail;
+                 } else if (d.type === 'complete') {
+                   showToast(`探测完成: 成功${d.success}, 失败${d.failed}`);
+                 }
+               } catch(e){}
             }
           }
         }
-      } catch (err) {
-        showToast('批量探测失败: ' + err.message, 'error');
-      } finally {
+      } catch(e){}
+      finally {
         isProbing = false;
-        btn.disabled = false;
-        btn.textContent = '⚡ 探测全部';
-        setTimeout(() => {
-          progressEl.classList.remove('show');
-          refresh();
-        }, 2000);
+        setTimeout(()=>{ document.getElementById('probeProgress').classList.remove('show'); refresh(); }, 2000);
       }
     }
 
-    function handleProbeEvent(data) {
-      const progressFill = document.getElementById('probeProgressFill');
-      const progressStats = document.getElementById('probeProgressStats');
-      const successCountEl = document.getElementById('probeSuccessCount');
-      const failedCountEl = document.getElementById('probeFailedCount');
-      const currentNode = document.getElementById('probeCurrentNode');
-
-      switch (data.type) {
-        case 'start':
-          progressStats.textContent = `0 / ${data.total}`;
-          currentNode.textContent = '开始探测...';
-          break;
-        case 'progress':
-          progressFill.style.width = `${data.progress}%`;
-          progressStats.textContent = `${data.current} / ${data.total}`;
-          if (data.error) {
-            failedCountEl.textContent = parseInt(failedCountEl.textContent) + 1;
-            currentNode.textContent = `❌ ${data.name}: ${data.error}`;
-          } else {
-            successCountEl.textContent = parseInt(successCountEl.textContent) + 1;
-            currentNode.textContent = `✅ ${data.name}: ${data.latency}ms`;
-          }
-          break;
-        case 'complete':
-          progressFill.style.width = '100%';
-          progressStats.textContent = `${data.total} / ${data.total}`;
-          successCountEl.textContent = data.success;
-          failedCountEl.textContent = data.failed;
-          currentNode.textContent = `完成！成功 ${data.success}，失败 ${data.failed}`;
-          showToast(`探测完成！成功 ${data.success} 个，失败 ${data.failed} 个`, 'success');
-          break;
-      }
-    }
-
-    async function release(tag) {
+    async function exportNodes() {
       try {
-        const res = await fetch('/api/nodes/' + encodeURIComponent(tag) + '/release', { method: 'POST' });
-        const data = await res.json();
-        if (data.error) {
-          showToast('释放失败: ' + data.error, 'error');
-        } else {
-          showToast('已解除节点 ' + tag + ' 的拉黑状态', 'success');
-        }
-        setTimeout(refresh, 500);
-      } catch (err) {
-        showToast('释放失败: ' + err.message, 'error');
-      }
+        const res = await fetch('/api/export');
+        if(!res.ok) throw new Error();
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'nodes.txt';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a); window.URL.revokeObjectURL(url);
+      } catch(e) { showToast('导出失败', 'error');}
     }
 
-    function toggleAutoRefresh() {
-      isAutoRefresh = !isAutoRefresh;
-      const btn = document.getElementById('autoRefreshText');
-      if (isAutoRefresh) {
-        btn.textContent = '关闭自动刷新';
-        startAutoRefresh();
-        showToast('已开启自动刷新', 'success');
-      } else {
-        btn.textContent = '开启自动刷新';
-        stopAutoRefresh();
-        showToast('已关闭自动刷新', 'success');
-      }
-    }
-
-    function startAutoRefresh() {
-      if (autoRefreshInterval) return;
-      autoRefreshInterval = setInterval(() => {
-        if (document.hidden) return;
-        if (!document.getElementById('monitorTab').classList.contains('active')) return;
-        refresh();
-      }, 10000);
-    }
-
-    function stopAutoRefresh() {
-      if (autoRefreshInterval) {
-        clearInterval(autoRefreshInterval);
-        autoRefreshInterval = null;
-      }
-    }
-
-    // 订阅状态相关
+    // Subscriptions
     async function fetchSubscriptionStatus() {
       try {
         const res = await fetch('/api/subscription/status');
-        if (!res.ok) return;
-        const data = await res.json();
-        updateSubscriptionUI(data);
-      } catch (err) {
-        console.error('获取订阅状态失败:', err);
-      }
+        if(!res.ok) return;
+        const d = await res.json();
+        const btn = document.getElementById('refreshSubBtn');
+        if(!d.enabled) { btn.style.display='none'; return; }
+        btn.style.display='inline-flex';
+        document.getElementById('subscriptionStatus').textContent = `[Sub: ${d.node_count}]`;
+        document.getElementById('subscriptionTrend').textContent = d.is_refreshing ? 'Syncing...' : (d.last_error ? 'ERR' : 'OK');
+      } catch(e){}
     }
-
-    function updateSubscriptionUI(data) {
-      const card = document.getElementById('subscriptionCard');
-      const btn = document.getElementById('refreshSubBtn');
-      const statusEl = document.getElementById('subscriptionStatus');
-      const trendEl = document.getElementById('subscriptionTrend');
-
-      if (!data.enabled) {
-        card.style.display = 'none';
-        btn.style.display = 'none';
-        return;
-      }
-
-      card.style.display = 'block';
-      btn.style.display = 'inline-flex';
-
-      if (data.is_refreshing) {
-        statusEl.textContent = '刷新中...';
-        statusEl.style.color = 'var(--warning)';
-        trendEl.textContent = '正在获取订阅...';
-        return;
-      }
-
-      statusEl.textContent = data.node_count || 0;
-      statusEl.style.color = data.last_error ? 'var(--error)' : 'var(--success)';
-
-      if (data.last_error) {
-        trendEl.textContent = '上次失败: ' + data.last_error;
-        trendEl.style.color = 'var(--error)';
-      } else if (data.last_refresh && data.last_refresh !== '0001-01-01T00:00:00Z') {
-        trendEl.textContent = '上次刷新: ' + formatTime(data.last_refresh);
-        trendEl.style.color = 'var(--success)';
-      } else {
-        trendEl.textContent = '等待首次刷新';
-        trendEl.style.color = 'var(--text-secondary)';
-      }
-    }
-
+    
     async function refreshSubscription() {
-      // Check if nodes have been modified since last refresh
       try {
-        const statusRes = await fetch('/api/subscription/status');
-        if (statusRes.ok) {
-          const status = await statusRes.json();
-          if (status.nodes_modified) {
-            const confirmed = confirm(
-              '⚠️ 警告：节点配置已被修改\n\n' +
-              '刷新订阅将会覆盖您对 nodes.txt 的所有修改！\n\n' +
-              '确定要继续吗？'
-            );
-            if (!confirmed) {
-              return;
-            }
-          }
-        }
-      } catch (e) {
-        // Ignore status check errors, proceed with refresh
-      }
-
-      const btn = document.getElementById('refreshSubBtn');
-      const text = document.getElementById('refreshSubText');
-
-      btn.disabled = true;
-      text.textContent = '刷新中...';
-
-      try {
-        const res = await fetch('/api/subscription/refresh', { method: 'POST' });
-        const data = await res.json();
-
-        if (!res.ok) {
-          showToast('订阅刷新失败: ' + (data.error || '未知错误'), 'error');
-        } else {
-          showToast('订阅刷新成功！共 ' + data.node_count + ' 个节点', 'success');
-          setTimeout(() => {
-            refresh();
-            fetchSubscriptionStatus();
-          }, 1000);
-        }
-      } catch (err) {
-        showToast('订阅刷新失败: ' + err.message, 'error');
-      } finally {
-        btn.disabled = false;
-        text.textContent = '刷新订阅';
-      }
+        const s = await fetch('/api/subscription/status').then(r=>r.json());
+        if(s.nodes_modified && !confirm('本地节点已修改，刷新将覆盖，继续？')) return;
+        showToast('开始刷新订阅...');
+        const r = await fetch('/api/subscription/refresh', {method:'POST'});
+        const res = await r.json();
+        if(res.error) showToast(res.error, 'error'); else { showToast(`成功获取 ${res.node_count} 节点`); refresh(); }
+      } catch(e) { showToast('失败'+e, 'error'); }
     }
 
-    // ========== 调试面板功能 ==========
-
-    async function loadDebugData() {
-      try {
-        const res = await fetch('/api/debug');
-        if (res.status === 401) {
-          showToast('请先登录', 'error');
-          document.getElementById('loginOverlay').classList.add('show');
-          return;
-        }
-        if (!res.ok) throw new Error('加载失败');
-        const data = await res.json();
-        renderDebugData(data);
-      } catch (err) {
-        showToast('加载调试数据失败: ' + err.message, 'error');
-      }
-    }
-
-    function renderDebugData(data) {
-      const nodes = data.nodes || [];
-      const container = document.getElementById('debugNodesContainer');
-      const emptyState = document.getElementById('debugEmptyState');
-
-      document.getElementById('debugTotalCalls').textContent = data.total_calls || 0;
-      document.getElementById('debugTotalSuccess').textContent = data.total_success || 0;
-
-      const rateEl = document.getElementById('debugSuccessRate');
-      const rate = data.success_rate || 0;
-      rateEl.textContent = rate.toFixed(1) + '%';
-      rateEl.style.color = rate > 90 ? 'var(--success)' : (rate > 70 ? 'var(--warning)' : 'var(--error)');
-
-      if (nodes.length === 0) {
-        container.innerHTML = '';
-        emptyState.style.display = 'block';
-        return;
-      }
-
-      emptyState.style.display = 'none';
-      container.innerHTML = nodes.map(node => {
-        const calls = (node.success_count || 0) + (node.failure_count || 0);
-        const successRate = calls > 0 ? ((node.success_count || 0) / calls * 100) : 0;
-        const rateColor = successRate > 90 ? 'var(--success)' : (successRate > 70 ? 'var(--warning)' : 'var(--error)');
-        const timeline = node.timeline || [];
-
-        const timelineHtml = timeline.length > 0 ? timeline.map(t => {
-          const color = t.success ? 'var(--success)' : 'var(--error)';
-          let time = '未知时间';
-          try {
-            const d = new Date(t.time);
-            if (!isNaN(d.getTime())) {
-              time = d.toLocaleTimeString('zh-CN');
-            }
-          } catch (e) {}
-          const title = `${time} - ${t.success ? '成功' : '失败'}${t.latency_ms > 0 ? ' (' + t.latency_ms + 'ms)' : ''}${t.error ? ' - ' + t.error : ''}`;
-          return `<div style="width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;" title="${escapeHtml(title)}"></div>`;
-        }).join('') : '<span style="font-size:11px;color:var(--text-secondary);">暂无最近记录</span>';
-
-        return `
-          <div class="node-card">
-            <div class="node-header" style="margin-bottom:8px;">
-              <div class="node-info">
-                <div class="node-name">${escapeHtml(node.name || node.tag)}</div>
-                <div class="node-tag">${escapeHtml(node.tag)}</div>
-              </div>
-              <div style="text-align:right;">
-                <div style="font-size:22px;font-weight:700;color:${rateColor};line-height:1;">${successRate.toFixed(1)}%</div>
-                <div style="font-size:10px;color:var(--text-secondary);margin-top:2px;">共 ${calls} 次</div>
-              </div>
-            </div>
-            <div class="metrics" style="margin-bottom:8px;">
-              <div class="metric">
-                <div class="metric-label">成功</div>
-                <div class="metric-value success">${node.success_count || 0}</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">失败</div>
-                <div class="metric-value ${node.failure_count > 0 ? 'error' : ''}">${node.failure_count || 0}</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">连接</div>
-                <div class="metric-value">${node.active_connections || 0}</div>
-              </div>
-              <div class="metric">
-                <div class="metric-label">延迟</div>
-                <div class="metric-value">${node.last_latency_ms >= 0 ? node.last_latency_ms + 'ms' : '--'}</div>
-              </div>
-            </div>
-            <div style="background:rgba(0,0,0,0.02);padding:8px 10px;border-radius:8px;">
-              <div style="font-size:10px;color:var(--text-secondary);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.02em;font-weight:500;">最近 ${timeline.length} 次调用</div>
-              <div style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;">
-                ${timelineHtml}
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-    }
-
-    // ========== 系统设置功能 ==========
-
-    function showSettingsModal() {
-      fetch('/api/settings')
-        .then(res => res.ok ? res.json() : {})
-        .then(data => {
-          document.getElementById('settingExternalIP').value = data.external_ip || '';
-          document.getElementById('settingProbeTarget').value = data.probe_target || '';
-          document.getElementById('settingSkipCertVerify').checked = data.skip_cert_verify || false;
-          document.getElementById('settingsError').classList.remove('show');
-          document.getElementById('settingsOverlay').classList.add('show');
-        })
-        .catch(err => {
-          console.error('Failed to load settings', err);
-          document.getElementById('settingsOverlay').classList.add('show');
-        });
-    }
-
-    function hideSettingsModal() {
-      document.getElementById('settingsOverlay').classList.remove('show');
-    }
-
-    async function handleSettingsSave(event) {
-      event.preventDefault();
-      const errorEl = document.getElementById('settingsError');
-      errorEl.classList.remove('show');
-
-      const payload = {
-        external_ip: document.getElementById('settingExternalIP').value.trim(),
-        probe_target: document.getElementById('settingProbeTarget').value.trim(),
-        skip_cert_verify: document.getElementById('settingSkipCertVerify').checked
-      };
-
-      try {
-        const res = await fetch('/api/settings', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-
-        const data = await res.json();
-        if (res.ok) {
-          if (data.need_reload) {
-            showToast('设置已保存，SSL 设置需重载生效', 'success');
-          } else {
-            showToast('设置保存成功', 'success');
-          }
-          hideSettingsModal();
-        } else {
-          errorEl.textContent = data.error || '保存失败';
-          errorEl.classList.add('show');
-        }
-      } catch (err) {
-        errorEl.textContent = '保存失败: ' + err.message;
-        errorEl.classList.add('show');
-      }
-    }
-
-    // ========== 节点管理功能 ==========
-
-    let configNodes = [];
-    let isEditMode = false;
-
-    // Tab 切换
-    function switchTab(tabName) {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-
-      document.querySelector(`.tab[onclick="switchTab('${tabName}')"]`).classList.add('active');
-      document.getElementById(tabName + 'Tab').classList.add('active');
-
-      if (tabName === 'manage') {
-        loadConfigNodes();
-      } else if (tabName === 'debug') {
-        loadDebugData();
-      }
-    }
-
-    // 加载配置节点列表
+    // Manage Nodes
     async function loadConfigNodes() {
       try {
         const res = await fetch('/api/nodes/config');
-        if (res.status === 401) {
-          showToast('请先登录', 'error');
-          document.getElementById('loginOverlay').classList.add('show');
-          return;
-        }
-        if (!res.ok) throw new Error('加载失败');
         const data = await res.json();
         configNodes = data.nodes || [];
-        renderConfigNodes();
-
-        // Check if subscription mode is active and show warning
-        const subWarning = document.getElementById('subscriptionWarning');
-        const hasSubscriptionNodes = configNodes.some(n => n.source === 'subscription');
-        if (hasSubscriptionNodes && subWarning) {
-          subWarning.style.display = 'block';
-        } else if (subWarning) {
-          subWarning.style.display = 'none';
-        }
-      } catch (err) {
-        showToast('加载配置节点失败: ' + err.message, 'error');
-      }
+        const tbody = document.getElementById('configNodesTableBody');
+        tbody.innerHTML = configNodes.map((n, i) => `
+          <tr>
+            <td><strong>${escapeHtml(n.name)}</strong></td>
+            <td class="tt-mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(n.uri)}</td>
+            <td class="tt-mono">${n.port || '-'}</td>
+            <td><span class="badge ${n.source==='subscription'?'badge-warning':'badge-healthy'}">${n.source||'manual'}</span></td>
+            <td>
+              <button class="btn btn-sm" onclick="showEditNodeModal('${escapeHtml(n.name)}')">编辑</button>
+              <button class="btn btn-sm btn-danger" onclick="deleteNode('${escapeHtml(n.name)}')">删除</button>
+            </td>
+          </tr>
+        `).join('');
+        document.getElementById('subscriptionWarning').style.display = configNodes.some(n=>n.source==='subscription') ? 'block' : 'none';
+      } catch(e){}
     }
 
-    // 渲染配置节点列表
-    function renderConfigNodes() {
-      const container = document.getElementById('configNodesContainer');
-      const emptyState = document.getElementById('configEmptyState');
+    function showAddNodeModal() { isEditMode=false; document.getElementById('nodeModalTitle').textContent='添加节点'; document.getElementById('nodeName').value=''; document.getElementById('nodeUri').value=''; document.getElementById('nodePort').value=''; document.getElementById('nodeModalOverlay').classList.add('show');}
+    function showEditNodeModal(name) { 
+      const n = configNodes.find(x=>x.name===name); if(!n) return;
+      isEditMode=true; document.getElementById('nodeModalTitle').textContent='编辑节点';
+      document.getElementById('nodeName').value=n.name; document.getElementById('nodeUri').value=n.uri; document.getElementById('nodePort').value=n.port||''; document.getElementById('nodeEditName').value=n.name;
+      document.getElementById('nodeModalOverlay').classList.add('show');
+    }
+    async function handleNodeSubmit(e) {
+      e.preventDefault();
+      const p = { name: document.getElementById('nodeName').value, uri: document.getElementById('nodeUri').value, port: parseInt(document.getElementById('nodePort').value)||0 };
+      try {
+        const editName = document.getElementById('nodeEditName').value;
+        const url = isEditMode ? '/api/nodes/config/'+encodeURIComponent(editName) : '/api/nodes/config';
+        const method = isEditMode ? 'PUT' : 'POST';
+        const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)});
+        if(r.ok) { document.getElementById('nodeModalOverlay').classList.remove('show'); showToast('成功'); loadConfigNodes(); } else { const d = await r.json(); showToast(d.error, 'error'); }
+      } catch(e){}
+    }
+    async function deleteNode(name) {
+      if(!confirm('Delete '+name+'?')) return;
+      try {
+        const r = await fetch('/api/nodes/config/'+encodeURIComponent(name), {method:'DELETE'});
+        if(r.ok) { showToast('删除成功'); loadConfigNodes(); }
+      } catch(e){}
+    }
+    async function triggerReload() {
+      if(!confirm('重载核心将中断连接，确认？')) return;
+      try { const r = await fetch('/api/reload', {method:'POST'}); if(r.ok) {showToast('重载成功'); refresh();} } catch(e){}
+    }
 
-      if (configNodes.length === 0) {
-        container.innerHTML = '';
-        emptyState.style.display = 'block';
-        return;
+    // Debug
+    async function loadDebugData() {
+      try {
+        const res = await fetch('/api/debug');
+        const d = await res.json();
+        document.getElementById('debugTotalCalls').textContent = d.total_calls||0;
+        document.getElementById('debugTotalSuccess').textContent = d.total_success||0;
+        document.getElementById('debugSuccessRate').textContent = (d.success_rate||0).toFixed(1)+'%';
+        const tb = document.getElementById('debugNodesTableBody');
+        tb.innerHTML = (d.nodes||[]).map(n => {
+          const calls = (n.success_count||0)+(n.failure_count||0);
+          const sr = calls>0 ? ((n.success_count||0)/calls*100).toFixed(1) : 0;
+          const tl = (n.timeline||[]).map(t => `<div class="tl-dot ${t.success?'success':'error'}" title="${t.latency_ms}ms"></div>`).join('');
+          return `<tr>
+            <td><strong>${escapeHtml(n.name)}</strong><br><span style="font-size:11px;color:var(--text-muted)">${escapeHtml(n.tag)}</span></td>
+            <td class="tt-mono ${sr>80?'':'badge-error'}">${sr}%</td>
+            <td class="tt-mono"><span style="color:var(--success)">${n.success_count||0}</span> / <span style="color:var(--error)">${n.failure_count||0}</span></td>
+            <td class="tt-mono">${n.active_connections||0}</td>
+            <td><div class="timeline">${tl||'-'}</div></td>
+          </tr>`
+        }).join('');
+        
+        window._debugNodes = d.nodes || [];
+        updateDebugCharts(d.success_rate || 0);
+
+      } catch(e){}
+    }
+
+    function updateDebugCharts(globalRate) {
+      if(!successRateChartInst) successRateChartInst = initEchart('successRateChart');
+      if(!failureChartInst) failureChartInst = initEchart('failureChart');
+
+      // Global Success Rate Gauge
+      let rate = globalRate;
+      if (typeof rate === 'undefined' || rate === null || isNaN(rate)) {
+         if (window._debugNodes && window._debugNodes.length > 0) {
+           let suc = 0, fail = 0;
+           window._debugNodes.forEach(n => { suc += (n.success_count||0); fail += (n.failure_count||0); });
+           rate = (suc+fail) > 0 ? (suc / (suc+fail)) * 100 : 0;
+         } else {
+           rate = 0;
+         }
       }
 
-      emptyState.style.display = 'none';
-      container.innerHTML = configNodes.map((node, index) => {
-        const truncatedUri = node.uri.length > 60 ? node.uri.substring(0, 60) + '...' : node.uri;
-        return `
-          <div class="config-node-card" data-index="${index}">
-            <div class="config-node-info">
-              <div class="config-node-name">${escapeHtml(node.name)}</div>
-              <div class="config-node-uri" title="${escapeHtml(node.uri)}">${escapeHtml(truncatedUri)}</div>
-              ${node.port ? `<div class="config-node-port">端口: ${node.port}</div>` : ''}
-            </div>
-            <div class="config-node-actions">
-              <button class="btn btn-secondary btn-sm" data-action="edit" data-index="${index}">
-                ✏️ 编辑
-              </button>
-              <button class="btn btn-danger btn-sm" data-action="delete" data-index="${index}">
-                🗑️ 删除
-              </button>
-            </div>
-          </div>
-        `;
-      }).join('');
+      successRateChartInst && successRateChartInst.setOption({
+        backgroundColor: 'transparent',
+        series: [{
+          type: 'gauge',
+          startAngle: 180, endAngle: 0,
+          center: ['50%', '75%'], radius: '90%',
+          min: 0, max: 100, splitNumber: 10,
+          axisLine: { lineStyle: { width: 12, color: [ [0.7, '#ef4444'], [0.9, '#f59e0b'], [1, '#10b981'] ] } },
+          pointer: { icon: 'path://M12.8,0.7l12,40.1H0.7L12.8,0.7z', length: '12%', width: 10, offsetCenter: [0, '-60%'], itemStyle: { color: 'auto' } },
+          axisTick: { length: 12, lineStyle: { color: 'auto', width: 2 } },
+          splitLine: { length: 20, lineStyle: { color: 'auto', width: 3 } },
+          axisLabel: { color: getCssVar('--text-muted'), fontSize: 10, distance: -50 },
+          title: { offsetCenter: [0, '-20%'], fontSize: 14, color: getCssVar('--text-muted') },
+          detail: { fontSize: 36, offsetCenter: [0, '0%'], valueAnimation: true, formatter: function (value) { return Math.round(value) + '%'; }, color: 'auto' },
+          data: [{ value: rate, name: 'Success Rate' }]
+        }]
+      });
 
-      // 使用事件委托处理按钮点击
-      container.querySelectorAll('button[data-action]').forEach(btn => {
-        btn.addEventListener('click', function() {
-          const index = parseInt(this.dataset.index);
-          const action = this.dataset.action;
-          const node = configNodes[index];
-          if (!node) return;
-          if (action === 'edit') {
-            showEditNodeModal(node.name);
-          } else if (action === 'delete') {
-            deleteNode(node.name);
+      // Top failures
+      if (!window._debugNodes) return;
+      const failSorted = window._debugNodes.filter(n => (n.failure_count||0) > 0).sort((a,b) => (b.failure_count||0) - (a.failure_count||0)).slice(0, 10);
+      const failX = failSorted.map(n => n.name || n.tag);
+      const failY = failSorted.map(n => n.failure_count);
+
+      failureChartInst && failureChartInst.setOption({
+        backgroundColor: 'transparent',
+        tooltip: { trigger: 'axis', backgroundColor: getCssVar('--bg-panel'), borderColor: getCssVar('--border'), textStyle: { color: getCssVar('--text-main') } },
+        grid: { left: '3%', right: '4%', bottom: '5%', top: '25%', containLabel: true },
+        xAxis: { type: 'category', data: failX, axisLabel: { color: getCssVar('--text-muted'), width: 60, overflow: 'truncate' } },
+        yAxis: { type: 'value', splitLine: { lineStyle: { color: getCssVar('--border'), type: 'dashed' } }, axisLabel: { color: getCssVar('--text-muted') } },
+        series: [{
+          name: 'Failures', type: 'bar', data: failY,
+          itemStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: '#f43f5e' },
+              { offset: 1, color: '#9f1239' }
+            ]),
+            borderRadius: [4, 4, 0, 0]
           }
-        });
+        }]
       });
     }
 
-    function escapeHtml(text) {
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML.replace(/"/g, '&quot;');
+    // Settings
+    async function loadSettingsPage() {
+      try {
+        const r = await fetch('/api/settings'); const d = await r.json();
+        // General
+        document.getElementById('settingMode').value = d.mode || 'pool';
+        document.getElementById('settingExternalIP').value = d.external_ip||'';
+        document.getElementById('settingProbeTarget').value = d.probe_target||'';
+        document.getElementById('settingSkipCertVerify').checked = d.skip_cert_verify||false;
+        // Listener
+        const ls = d.listener || {};
+        document.getElementById('settingListenerAddr').value = ls.address || '';
+        document.getElementById('settingListenerPort').value = ls.port || '';
+        document.getElementById('settingListenerUser').value = ls.username || '';
+        document.getElementById('settingListenerPass').value = ls.password || '';
+        // Multi-port
+        const mp = d.multi_port || {};
+        document.getElementById('settingMPAddr').value = mp.address || '';
+        document.getElementById('settingMPBasePort').value = mp.base_port || '';
+        document.getElementById('settingMPUser').value = mp.username || '';
+        document.getElementById('settingMPPass').value = mp.password || '';
+        // Pool
+        const pl = d.pool || {};
+        document.getElementById('settingPoolMode').value = pl.mode || 'random';
+        document.getElementById('settingPoolFailure').value = pl.failure_threshold || 3;
+        document.getElementById('settingPoolBlacklist').value = pl.blacklist_duration || '24h';
+        // Management
+        const mgmt = d.management || {};
+        document.getElementById('settingMgmtListen').value = mgmt.listen || '';
+        document.getElementById('settingMgmtPassword').value = mgmt.password || '';
+        // GeoIP
+        const geo = d.geoip || {};
+        document.getElementById('settingGeoIPEnabled').checked = geo.enabled || false;
+        document.getElementById('settingGeoIPDBPath').value = geo.database_path || '';
+        document.getElementById('settingGeoIPListen').value = geo.listen || '';
+        document.getElementById('settingGeoIPPort').value = geo.port || '';
+        document.getElementById('settingGeoIPAutoUpdate').checked = geo.auto_update_enabled || false;
+        document.getElementById('settingGeoIPUpdateInterval').value = geo.auto_update_interval || '24h0m0s';
+        // Log
+        const logCfg = d.log || {};
+        document.getElementById('settingLogOutput').value = logCfg.output || 'stdout';
+        document.getElementById('settingLogMaxSize').value = logCfg.max_size || 50;
+        document.getElementById('settingLogMaxBackups').value = logCfg.max_backups || 3;
+        document.getElementById('settingLogMaxAge').value = logCfg.max_age || 7;
+        document.getElementById('settingLogCompress').checked = logCfg.compress || false;
+        toggleLogFileSettings();
+        // Subscription
+        try {
+          const sr = await fetch('/api/subscription/config'); const sd = await sr.json();
+          document.getElementById('settingSubEnabled').checked = sd.enabled || false;
+          const iv = sd.interval || '';
+          const sel = document.getElementById('settingSubInterval');
+          let matched = false;
+          for (let opt of sel.options) { if (iv === opt.value || iv === opt.value.replace('m','m0s') || iv.startsWith(opt.value)) { sel.value = opt.value; matched = true; break; } }
+          if (!matched) sel.value = '1h';
+          document.getElementById('settingSubURLs').value = (sd.subscriptions || []).join('\n');
+          _savedSubSnapshot = JSON.stringify({urls: (sd.subscriptions || []).join('\n'), enabled: sd.enabled || false, interval: sel.value});
+        } catch(e){}
+        // Take core snapshot after all fields are populated
+        _savedCoreSnapshot = _buildCoreSnapshot();
+      } catch(e){ console.error('Failed to load settings:', e); }
+    }
+    function _buildCoreSnapshot() {
+      return JSON.stringify({
+        mode: document.getElementById('settingMode').value,
+        external_ip: document.getElementById('settingExternalIP').value,
+        probe_target: document.getElementById('settingProbeTarget').value,
+        skip_cert_verify: document.getElementById('settingSkipCertVerify').checked,
+        listener_addr: document.getElementById('settingListenerAddr').value,
+        listener_port: document.getElementById('settingListenerPort').value,
+        listener_user: document.getElementById('settingListenerUser').value,
+        listener_pass: document.getElementById('settingListenerPass').value,
+        mp_addr: document.getElementById('settingMPAddr').value,
+        mp_base_port: document.getElementById('settingMPBasePort').value,
+        mp_user: document.getElementById('settingMPUser').value,
+        mp_pass: document.getElementById('settingMPPass').value,
+        pool_mode: document.getElementById('settingPoolMode').value,
+        pool_failure: document.getElementById('settingPoolFailure').value,
+        pool_blacklist: document.getElementById('settingPoolBlacklist').value,
+        mgmt_listen: document.getElementById('settingMgmtListen').value,
+        mgmt_password: document.getElementById('settingMgmtPassword').value,
+        geoip_enabled: document.getElementById('settingGeoIPEnabled').checked,
+        geoip_db: document.getElementById('settingGeoIPDBPath').value,
+        geoip_listen: document.getElementById('settingGeoIPListen').value,
+        geoip_port: document.getElementById('settingGeoIPPort').value,
+        geoip_auto: document.getElementById('settingGeoIPAutoUpdate').checked,
+        geoip_interval: document.getElementById('settingGeoIPUpdateInterval').value,
+        log_output: document.getElementById('settingLogOutput').value,
+        log_max_size: document.getElementById('settingLogMaxSize').value,
+        log_max_backups: document.getElementById('settingLogMaxBackups').value,
+        log_max_age: document.getElementById('settingLogMaxAge').value,
+        log_compress: document.getElementById('settingLogCompress').checked,
+      });
+    }
+    function toggleLogFileSettings() {
+      const output = document.getElementById('settingLogOutput').value;
+      document.getElementById('logFileSettings').style.display = output === 'file' ? 'grid' : 'none';
     }
 
-    // 显示添加节点弹窗
-    function showAddNodeModal() {
-      isEditMode = false;
-      document.getElementById('nodeModalTitle').textContent = '➕ 添加节点';
-      document.getElementById('nodeModalDesc').textContent = '输入节点信息';
-      document.getElementById('nodeSubmitBtn').textContent = '添加';
-      document.getElementById('nodeName').value = '';
-      document.getElementById('nodeUri').value = '';
-      document.getElementById('nodePort').value = '';
-      document.getElementById('nodeEditName').value = '';
-      document.getElementById('nodeModalError').classList.remove('show');
-      document.getElementById('nodeModalOverlay').classList.add('show');
-    }
+    async function handleSettingsSave(e) {
+      e.preventDefault();
+      const saveBtn = e.target.querySelector('button[type="submit"]');
+      const originalText = saveBtn.textContent;
 
-    // 显示编辑节点弹窗
-    function showEditNodeModal(name) {
-      const node = configNodes.find(n => n.name === name);
-      if (!node) return;
+      // Build current snapshots for change detection
+      const currentCoreSnapshot = _buildCoreSnapshot();
+      const subURLs = document.getElementById('settingSubURLs').value.split('\n').map(s => s.trim()).filter(s => s);
+      const subEnabled = document.getElementById('settingSubEnabled').checked;
+      const subInterval = document.getElementById('settingSubInterval').value;
+      const currentSubSnapshot = JSON.stringify({urls: subURLs.join('\n'), enabled: subEnabled, interval: subInterval});
 
-      isEditMode = true;
-      document.getElementById('nodeModalTitle').textContent = '✏️ 编辑节点';
-      document.getElementById('nodeModalDesc').textContent = '修改节点信息';
-      document.getElementById('nodeSubmitBtn').textContent = '保存';
-      document.getElementById('nodeName').value = node.name;
-      document.getElementById('nodeUri').value = node.uri;
-      document.getElementById('nodePort').value = node.port || '';
-      document.getElementById('nodeEditName').value = name;
-      document.getElementById('nodeModalError').classList.remove('show');
-      document.getElementById('nodeModalOverlay').classList.add('show');
-    }
+      const coreChanged = currentCoreSnapshot !== _savedCoreSnapshot;
+      const subChanged = currentSubSnapshot !== _savedSubSnapshot;
 
-    // 隐藏节点弹窗
-    function hideNodeModal() {
-      document.getElementById('nodeModalOverlay').classList.remove('show');
-    }
-
-    // 处理节点表单提交
-    async function handleNodeSubmit(event) {
-      event.preventDefault();
-      const errorEl = document.getElementById('nodeModalError');
-      errorEl.classList.remove('show');
-
-      const payload = {
-        name: document.getElementById('nodeName').value.trim(),
-        uri: document.getElementById('nodeUri').value.trim(),
-        port: parseInt(document.getElementById('nodePort').value) || 0
-      };
-
-      if (!payload.uri) {
-        errorEl.textContent = 'URI 不能为空';
-        errorEl.classList.add('show');
-        return;
+      if (!coreChanged && !subChanged) {
+        showToast('配置未变更'); return;
       }
 
+      // Save core settings if changed
+      if (coreChanged) {
+        saveBtn.disabled = true; saveBtn.textContent = '保存中...'; saveBtn.style.opacity = '0.6';
+        const p = {
+          external_ip: document.getElementById('settingExternalIP').value,
+          probe_target: document.getElementById('settingProbeTarget').value,
+          skip_cert_verify: document.getElementById('settingSkipCertVerify').checked,
+          mode: document.getElementById('settingMode').value,
+          listener: {
+            address: document.getElementById('settingListenerAddr').value,
+            port: parseInt(document.getElementById('settingListenerPort').value) || 0,
+            username: document.getElementById('settingListenerUser').value,
+            password: document.getElementById('settingListenerPass').value,
+          },
+          multi_port: {
+            address: document.getElementById('settingMPAddr').value,
+            base_port: parseInt(document.getElementById('settingMPBasePort').value) || 0,
+            username: document.getElementById('settingMPUser').value,
+            password: document.getElementById('settingMPPass').value,
+          },
+          pool: {
+            mode: document.getElementById('settingPoolMode').value,
+            failure_threshold: parseInt(document.getElementById('settingPoolFailure').value) || 3,
+            blacklist_duration: document.getElementById('settingPoolBlacklist').value || '24h',
+          },
+          management: {
+            listen: document.getElementById('settingMgmtListen').value,
+            password: document.getElementById('settingMgmtPassword').value,
+          },
+          log: {
+            output: document.getElementById('settingLogOutput').value,
+            max_size: parseInt(document.getElementById('settingLogMaxSize').value) || 50,
+            max_backups: parseInt(document.getElementById('settingLogMaxBackups').value) || 3,
+            max_age: parseInt(document.getElementById('settingLogMaxAge').value) || 7,
+            compress: document.getElementById('settingLogCompress').checked,
+          },
+          geoip: {
+            enabled: document.getElementById('settingGeoIPEnabled').checked,
+            database_path: document.getElementById('settingGeoIPDBPath').value,
+            listen: document.getElementById('settingGeoIPListen').value,
+            port: parseInt(document.getElementById('settingGeoIPPort').value) || 0,
+            auto_update_enabled: document.getElementById('settingGeoIPAutoUpdate').checked,
+            auto_update_interval: document.getElementById('settingGeoIPUpdateInterval').value || '24h',
+          }
+        };
+        try {
+          const r = await fetch('/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(p)});
+          if(!r.ok) { showToast('保存失败', 'error'); saveBtn.disabled = false; saveBtn.textContent = originalText; saveBtn.style.opacity = '1'; return; }
+        } catch(e){ showToast('保存失败', 'error'); saveBtn.disabled = false; saveBtn.textContent = originalText; saveBtn.style.opacity = '1'; return; }
+        _savedCoreSnapshot = currentCoreSnapshot;
+      }
+
+      // Save subscription config if changed
+      if (subChanged) {
+        showFullscreenLoading('更新订阅中...', '正在拉取订阅并重载节点，请稍候');
+        const subPayload = { subscriptions: subURLs, enabled: subEnabled, interval: subInterval };
+        try {
+          const sr = await fetch('/api/subscription/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(subPayload)});
+          hideFullscreenLoading();
+          if(!sr.ok) { showToast('订阅配置保存失败', 'error'); saveBtn.disabled = false; saveBtn.textContent = originalText; saveBtn.style.opacity = '1'; return; }
+          const sd = await sr.json();
+          _savedSubSnapshot = currentSubSnapshot;
+          if (sd.refresh_error) {
+            showToast('订阅已保存，但刷新失败: ' + sd.refresh_error, 'error');
+          } else if (sd.node_count !== undefined) {
+            showToast('已保存，获取 ' + sd.node_count + ' 个节点');
+          } else {
+            showToast('设置已保存');
+          }
+        } catch(e){ hideFullscreenLoading(); showToast('订阅配置保存失败', 'error'); saveBtn.disabled = false; saveBtn.textContent = originalText; saveBtn.style.opacity = '1'; return; }
+      } else if (coreChanged) {
+        // Core changed but no sub change — trigger reload
+        showFullscreenLoading('重载核心中...', '正在应用新配置');
+        try {
+          const rr = await fetch('/api/reload', {method:'POST'});
+          hideFullscreenLoading();
+          if (rr.ok) { showToast('已保存并重载成功'); } else { showToast('已保存，重载失败', 'error'); }
+        } catch(e) { hideFullscreenLoading(); showToast('已保存，重载失败', 'error'); }
+      }
+      saveBtn.disabled = false; saveBtn.textContent = originalText; saveBtn.style.opacity = '1';
+      refresh();
+    }
+
+    let logPollInterval = null;
+    function startLogPolling() {
+      pollLogs();
+      if (!logPollInterval) logPollInterval = setInterval(pollLogs, 2000);
+    }
+    function stopLogPolling() {
+      if (logPollInterval) { clearInterval(logPollInterval); logPollInterval = null; }
+    }
+    async function pollLogs() {
       try {
-        let res;
-        if (isEditMode) {
-          const editName = document.getElementById('nodeEditName').value;
-          res = await fetch('/api/nodes/config/' + encodeURIComponent(editName), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
+        const r = await fetch('/api/logs');
+        const d = await r.json();
+        if (d.logs) {
+          const ta = document.getElementById('consoleLogs');
+          const autoScroll = document.getElementById('autoScrollLogs').checked;
+          const prevTop = ta.scrollTop;
+          ta.value = d.logs;
+          if (autoScroll) {
+             ta.scrollTop = ta.scrollHeight;
+          } else {
+             ta.scrollTop = prevTop;
+          }
+        }
+      } catch(e){}
+    }
+
+    // ─── Theme System: Dark / Light / Auto (follow OS) ───
+    const THEME_LABELS = { dark: '深色模式', light: '浅色模式', auto: '跟随系统' };
+    const osMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+    function getOsTheme() { return osMediaQuery.matches ? 'dark' : 'light'; }
+
+    function reRenderCharts() {
+      if (regionChartInst) { regionChartInst.dispose(); regionChartInst = null; }
+      if (latencyChartInst) { latencyChartInst.dispose(); latencyChartInst = null; }
+      if (trafficChartInst) { trafficChartInst.dispose(); trafficChartInst = null; }
+      if (successRateChartInst) { successRateChartInst.dispose(); successRateChartInst = null; }
+      if (failureChartInst) { failureChartInst.dispose(); failureChartInst = null; }
+
+      const dash = document.getElementById('dashboardTab');
+      if (dash && dash.classList.contains('active') && typeof updateDashboardCharts === 'function') {
+        updateDashboardCharts();
+      }
+      const dbg = document.getElementById('debugTab');
+      if (dbg && dbg.classList.contains('active')) {
+        if (trafficSource) { trafficSource.close(); trafficSource = null; trafficTime = []; trafficDataUp = []; trafficDataDown = []; }
+        if (typeof updateDebugCharts === 'function') updateDebugCharts();
+      }
+    }
+
+    function applyTheme(visualTheme, shouldReRender) {
+      document.documentElement.setAttribute('data-theme', visualTheme);
+      if (shouldReRender) reRenderCharts();
+    }
+
+    function syncToggleButton(mode) {
+      const btn = document.getElementById('themeToggleBtn');
+      const label = document.getElementById('themeModeLabel');
+      if (btn) btn.setAttribute('data-mode', mode);
+      if (label) label.textContent = THEME_LABELS[mode] || mode;
+    }
+
+    function toggleTheme() {
+      // Cycle: auto → dark → light → auto
+      const saved = localStorage.getItem('themeMode') || 'auto';
+      const next = saved === 'auto' ? 'dark' : (saved === 'dark' ? 'light' : 'auto');
+      localStorage.setItem('themeMode', next);
+      // Remove legacy key
+      localStorage.removeItem('theme');
+
+      const visual = next === 'auto' ? getOsTheme() : next;
+      applyTheme(visual, true);
+      syncToggleButton(next);
+    }
+
+    // Listen for OS theme changes — only affects UI when in auto mode
+    osMediaQuery.addEventListener('change', () => {
+      const mode = localStorage.getItem('themeMode') || 'auto';
+      if (mode === 'auto') {
+        applyTheme(getOsTheme(), true);
+      }
+    });
+
+    // Init Theme on page load
+    (function initTheme() {
+      // Migrate from legacy 'theme' key
+      const legacyTheme = localStorage.getItem('theme');
+      let mode = localStorage.getItem('themeMode');
+      if (!mode) {
+        if (legacyTheme) {
+          mode = legacyTheme; // 'dark' or 'light'
+          localStorage.setItem('themeMode', mode);
+          localStorage.removeItem('theme');
         } else {
-          res = await fetch('/api/nodes/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
+          mode = 'auto';
         }
-
-        const data = await res.json();
-        if (!res.ok) {
-          errorEl.textContent = data.error || '操作失败';
-          errorEl.classList.add('show');
-          return;
-        }
-
-        hideNodeModal();
-        showToast(data.message || (isEditMode ? '节点已更新' : '节点已添加'), 'success');
-        loadConfigNodes();
-      } catch (err) {
-        errorEl.textContent = '操作失败: ' + err.message;
-        errorEl.classList.add('show');
       }
-    }
-
-    // 删除节点
-    async function deleteNode(name) {
-      if (!confirm(`确定要删除节点 "${name}" 吗？`)) return;
-
-      try {
-        const res = await fetch('/api/nodes/config/' + encodeURIComponent(name), {
-          method: 'DELETE'
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data.error || '删除失败', 'error');
-          return;
-        }
-        showToast(data.message || '节点已删除', 'success');
-        loadConfigNodes();
-      } catch (err) {
-        showToast('删除失败: ' + err.message, 'error');
-      }
-    }
-
-    // 触发重载
-    async function triggerReload() {
-      if (!confirm('重载配置会中断所有现有连接，确定要继续吗？')) return;
-
-      const btn = document.getElementById('reloadBtn');
-      btn.disabled = true;
-      btn.textContent = '重载中...';
-
-      try {
-        const res = await fetch('/api/reload', { method: 'POST' });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data.error || '重载失败', 'error');
-          return;
-        }
-        showToast(data.message || '重载成功', 'success');
-        // 刷新监控数据
-        setTimeout(() => {
-          refresh();
-          loadConfigNodes();
-        }, 2000);
-      } catch (err) {
-        showToast('重载失败: ' + err.message, 'error');
-      } finally {
-        btn.disabled = false;
-        btn.innerHTML = `
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M13.65 2.35A7.958 7.958 0 0 0 8 0C3.58 0 0 3.58 0 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L9 7h7V0l-2.35 2.35z" fill="currentColor"/>
-          </svg>
-          重载配置
-        `;
-      }
-    }
-
-    // 初始化
-    (async function init() {
-      const authenticated = await checkAuth();
-      if (authenticated) {
-        isAuthenticated = true;
-        refresh();
-        fetchSubscriptionStatus();
-        startAutoRefresh();
-      }
+      const visual = mode === 'auto' ? getOsTheme() : mode;
+      applyTheme(visual, false);
+      syncToggleButton(mode);
     })();
+
+    // Init App
+    checkAuth().then(ok => { if(ok) { refresh(); startAutoRefresh(); } });
+
+    // Fetch GitHub stars
+    fetch('https://api.github.com/repos/jasonwong1991/easy_proxies')
+      .then(r => r.json())
+      .then(d => { if(d.stargazers_count !== undefined) document.getElementById('githubStars').textContent = d.stargazers_count; })
+      .catch(() => {});
   </script>
 </body>
 </html>

@@ -12,6 +12,7 @@ services:
     volumes:
       - ./config.yaml:/etc/easy-proxies/config.yaml
       - ./nodes.txt:/etc/easy-proxies/nodes.txt
+      - ./logs:/app/logs
 
 networks:
   1panel-network:

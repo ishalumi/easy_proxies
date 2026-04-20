@@ -100,6 +100,7 @@ type entry struct {
 	active           atomic.Int32
 	probe            probeFunc
 	release          releaseFunc
+	blacklistFn      func(time.Duration)
 	initialCheckDone bool
 	available        bool
 	mu               sync.RWMutex
@@ -264,6 +265,11 @@ func (m *Manager) StartPeriodicHealthCheck(interval, timeout time.Duration) {
 	}
 }
 
+// ProbeAllNow triggers a one-time health check on all nodes (e.g. after reload).
+func (m *Manager) ProbeAllNow(timeout time.Duration) {
+	m.probeAllNodes(timeout)
+}
+
 // probeAllNodes checks all registered nodes concurrently.
 func (m *Manager) probeAllNodes(timeout time.Duration) {
 	m.mu.RLock()
@@ -383,6 +389,14 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 	return &EntryHandle{ref: e}
 }
 
+// ClearNodes removes all registered nodes. Call before re-registering
+// during a config reload so stale entries don't persist in the dashboard.
+func (m *Manager) ClearNodes() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nodes = make(map[string]*entry)
+}
+
 // ProbeRequest returns the normalized request used for health checks.
 func (m *Manager) ProbeRequest() (ProbeRequest, bool) {
 	if !m.probeReady {
@@ -413,7 +427,7 @@ func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 		// 如果只要可用节点：
 		// - 跳过已完成检查但不可用的节点
 		// - 保留未完成检查的节点（它们会在首次使用时被检查）
-		if onlyAvailable && snap.InitialCheckDone && !snap.Available {
+		if onlyAvailable && ((snap.InitialCheckDone && !snap.Available) || snap.Blacklisted) {
 			continue
 		}
 		snapshots = append(snapshots, snap)
@@ -467,6 +481,25 @@ func (m *Manager) Release(tag string) error {
 		return errors.New("release not available for this node")
 	}
 	e.release()
+	return nil
+}
+
+// ManualBlacklist manually blacklists a node for the given duration.
+func (m *Manager) ManualBlacklist(tag string, duration time.Duration) error {
+	e, err := m.entry(tag)
+	if err != nil {
+		return err
+	}
+	e.mu.RLock()
+	fn := e.blacklistFn
+	e.mu.RUnlock()
+
+	if fn != nil {
+		// Blacklist in pool shared state (affects routing)
+		fn(duration)
+	}
+	// Also mark in monitor state (affects UI display)
+	e.blacklistUntil(time.Now().Add(duration))
 	return nil
 }
 
@@ -672,6 +705,16 @@ func (h *EntryHandle) SetRelease(fn func()) {
 		return
 	}
 	h.ref.setRelease(fn)
+}
+
+// SetBlacklistFn assigns a manual blacklist function.
+func (h *EntryHandle) SetBlacklistFn(fn func(time.Duration)) {
+	if h == nil || h.ref == nil {
+		return
+	}
+	h.ref.mu.Lock()
+	h.ref.blacklistFn = fn
+	h.ref.mu.Unlock()
 }
 
 // MarkInitialCheckDone marks the initial health check as completed.

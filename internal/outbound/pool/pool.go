@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -19,7 +20,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
-	"github.com/sagernet/sing-box/log"
+	singlog "github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -75,7 +76,7 @@ type memberState struct {
 type poolOutbound struct {
 	outbound.Adapter
 	ctx            context.Context
-	logger         log.ContextLogger
+	logger         singlog.ContextLogger
 	manager        adapter.OutboundManager
 	options        Options
 	mode           string
@@ -88,7 +89,7 @@ type poolOutbound struct {
 	candidatesPool sync.Pool
 }
 
-func newPool(ctx context.Context, _ adapter.Router, logger log.ContextLogger, tag string, options Options) (adapter.Outbound, error) {
+func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger, tag string, options Options) (adapter.Outbound, error) {
 	if len(options.Members) == 0 {
 		return nil, E.New("pool requires at least one member")
 	}
@@ -138,8 +139,9 @@ func newPool(ctx context.Context, _ adapter.Router, logger log.ContextLogger, ta
 				// Attach entry to shared state so all pool instances share it
 				state.attachEntry(entry)
 				logger.Info("registered node: ", memberTag)
-				// Set probe and release functions immediately
+				// Set probe, release, and blacklist functions immediately
 				entry.SetRelease(p.makeReleaseByTagFunc(memberTag))
+				entry.SetBlacklistFn(p.makeBlacklistByTagFunc(memberTag))
 				if probeFn := p.makeProbeByTagFunc(memberTag); probeFn != nil {
 					entry.SetProbe(probeFn)
 				}
@@ -150,6 +152,9 @@ func newPool(ctx context.Context, _ adapter.Router, logger log.ContextLogger, ta
 	} else {
 		logger.Warn("monitor manager is nil, skipping node registration")
 	}
+
+	// Register this pool outbound in the dialer registry for GeoIP router
+	registerDialer(tag, p)
 
 	return p, nil
 }
@@ -233,6 +238,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 				state.attachEntry(entry)
 				member.entry = entry
 				entry.SetRelease(p.makeReleaseFunc(member))
+				entry.SetBlacklistFn(p.makeBlacklistByTagFunc(member.tag))
 				if probe := p.makeProbeFunc(member); probe != nil {
 					entry.SetProbe(probe)
 				}
@@ -298,8 +304,12 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 			if err != nil {
 				p.logger.Warn("initial probe failed for ", member.tag, ": ", err)
 				failedCount.Add(1)
-				if member.entry != nil {
+				if member.shared != nil {
+					member.shared.recordFailure(err, 1, p.options.BlacklistDuration)
+				} else if member.entry != nil {
 					member.entry.RecordFailure(err)
+				}
+				if member.entry != nil {
 					member.entry.MarkInitialCheckDone(false)
 				}
 				return
@@ -310,8 +320,12 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 			if err != nil {
 				p.logger.Warn("initial HTTP probe failed for ", member.tag, ": ", err)
 				failedCount.Add(1)
-				if member.entry != nil {
+				if member.shared != nil {
+					member.shared.recordFailure(err, 1, p.options.BlacklistDuration)
+				} else if member.entry != nil {
 					member.entry.RecordFailure(err)
+				}
+				if member.entry != nil {
 					member.entry.MarkInitialCheckDone(false)
 				}
 				return
@@ -519,8 +533,10 @@ func (p *poolOutbound) recordFailure(member *memberState, cause error) {
 	failures, blacklisted, _ := member.shared.recordFailure(cause, p.options.FailureThreshold, p.options.BlacklistDuration)
 	if blacklisted {
 		p.logger.Warn("proxy ", member.tag, " blacklisted for ", p.options.BlacklistDuration, ": ", cause)
+		log.Printf("[pool] %s blacklisted for %s: %v", member.tag, p.options.BlacklistDuration, cause)
 	} else {
 		p.logger.Warn("proxy ", member.tag, " failure ", failures, "/", p.options.FailureThreshold, ": ", cause)
+		log.Printf("[pool] %s failure %d/%d: %v", member.tag, failures, p.options.FailureThreshold, cause)
 	}
 }
 
@@ -722,6 +738,13 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 func (p *poolOutbound) makeReleaseByTagFunc(tag string) func() {
 	return func() {
 		releaseSharedMember(tag)
+	}
+}
+
+// makeBlacklistByTagFunc creates a blacklist function for manual ban via API
+func (p *poolOutbound) makeBlacklistByTagFunc(tag string) func(time.Duration) {
+	return func(duration time.Duration) {
+		blacklistSharedMember(tag, duration)
 	}
 }
 

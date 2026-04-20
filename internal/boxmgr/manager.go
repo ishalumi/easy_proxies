@@ -13,11 +13,14 @@ import (
 
 	"easy_proxies/internal/builder"
 	"easy_proxies/internal/config"
+	"easy_proxies/internal/geoip"
 	"easy_proxies/internal/monitor"
 	"easy_proxies/internal/outbound/pool"
 
 	"github.com/sagernet/sing-box"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/include"
+	"github.com/sagernet/sing-box/option"
 )
 
 // Ensure Manager implements monitor.NodeManager.
@@ -53,6 +56,7 @@ type Manager struct {
 	currentBox    *box.Box
 	monitorMgr    *monitor.Manager
 	monitorServer *monitor.Server
+	geoRouter     *geoip.Router
 	cfg           *config.Config
 	monitorCfg    monitor.Config
 
@@ -155,6 +159,12 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	m.logger.Infof("sing-box instance started with %d nodes", len(cfg.Nodes))
+
+	// Start GeoIP router if enabled
+	if cfg.GeoIP.Enabled {
+		m.startGeoIPRouter(ctx, cfg)
+	}
+
 	return nil
 }
 
@@ -189,15 +199,29 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 		if err := oldBox.Close(); err != nil {
 			m.logger.Warnf("error closing old instance: %v", err)
 		}
-		// Give OS time to release ports
-		time.Sleep(500 * time.Millisecond)
 	}
+
+	// Stop GeoIP router before starting new box to release its port
+	m.mu.Lock()
+	if m.geoRouter != nil {
+		m.geoRouter.Stop()
+		m.geoRouter = nil
+	}
+	m.mu.Unlock()
+
+	// Give OS time to release ports
+	time.Sleep(500 * time.Millisecond)
 
 	// Reset shared state store to ensure clean state for new config
 	pool.ResetSharedStateStore()
 	// 清空 monitor 旧节点，释放对旧 outbound 的引用
 	if m.monitorMgr != nil {
 		m.monitorMgr.Reset()
+	}
+
+	// Clear stale monitor nodes so the dashboard reflects the new config
+	if m.monitorMgr != nil {
+		m.monitorMgr.ClearNodes()
 	}
 
 	// Create and start new box instance with automatic port conflict resolution
@@ -233,7 +257,30 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 	m.cfg = newCfg
 	m.mu.Unlock()
 
+	// Sync config to monitor server so future WebUI settings changes target the current config pointer
+	if m.monitorServer != nil {
+		m.monitorServer.SetConfig(m.cfg)
+	}
+
+	// Trigger initial health check for newly registered nodes
+	if m.monitorMgr != nil {
+		go m.monitorMgr.ProbeAllNow(periodicHealthTimeout)
+	}
+
 	m.logger.Infof("reload completed successfully with %d nodes", len(newCfg.Nodes))
+
+	// Restart GeoIP router with new pools
+	if newCfg.GeoIP.Enabled {
+		m.startGeoIPRouter(ctx, newCfg)
+	} else {
+		m.mu.Lock()
+		if m.geoRouter != nil {
+			m.geoRouter.Stop()
+			m.geoRouter = nil
+		}
+		m.mu.Unlock()
+	}
+
 	return nil
 }
 
@@ -257,6 +304,10 @@ func (m *Manager) rollbackToOldConfig(ctx context.Context, oldCfg *config.Config
 	m.currentBox = instance
 	m.cfg = oldCfg
 	m.mu.Unlock()
+	// Sync config pointer to monitor server after rollback
+	if m.monitorServer != nil {
+		m.monitorServer.SetConfig(m.cfg)
+	}
 	m.logger.Infof("rollback successful")
 }
 
@@ -279,6 +330,10 @@ func (m *Manager) Close() error {
 		m.monitorMgr = nil
 		m.healthCheckStarted = false
 	}
+	if m.geoRouter != nil {
+		m.geoRouter.Stop()
+		m.geoRouter = nil
+	}
 	m.baseCtx = nil
 	return err
 }
@@ -297,6 +352,66 @@ func (m *Manager) MonitorServer() *monitor.Server {
 	return m.monitorServer
 }
 
+// startGeoIPRouter starts the GeoIP region-routing HTTP proxy server.
+func (m *Manager) startGeoIPRouter(ctx context.Context, cfg *config.Config) {
+	// Stop existing router if any
+	m.mu.Lock()
+	if m.geoRouter != nil {
+		m.geoRouter.Stop()
+		m.geoRouter = nil
+	}
+	m.mu.Unlock()
+
+	geoipPort := cfg.GeoIP.Port
+	if geoipPort == 0 {
+		geoipPort = 1221 // Default GeoIP router port
+	}
+	// Avoid conflict with the pool listener port
+	if geoipPort == cfg.Listener.Port {
+		geoipPort = 1221
+		if geoipPort == cfg.Listener.Port {
+			geoipPort = cfg.Listener.Port + 1
+		}
+		log.Printf("⚠️  GeoIP port conflicts with listener port %d, using %d instead", cfg.Listener.Port, geoipPort)
+	}
+	geoipListen := cfg.GeoIP.Listen
+	if geoipListen == "" {
+		geoipListen = cfg.Listener.Address
+	}
+
+	routerCfg := geoip.RouterConfig{
+		Listen:   geoipListen,
+		Port:     geoipPort,
+		Username: cfg.Listener.Username,
+		Password: cfg.Listener.Password,
+	}
+
+	router := geoip.NewRouter(routerCfg, nil)
+
+	// Register region pool dialers
+	for _, region := range geoip.AllRegions() {
+		poolTag := fmt.Sprintf("pool-%s", region)
+		if dialer, ok := pool.GetDialer(poolTag); ok {
+			router.SetPool(region, dialer)
+			log.Printf("   GeoIP: registered pool %s for region /%s", poolTag, region)
+		}
+	}
+
+	// Register global pool dialer (for requests without region path)
+	if dialer, ok := pool.GetDialer(pool.Tag); ok {
+		router.SetGlobalPool(dialer)
+	}
+
+	if err := router.Start(ctx); err != nil {
+		m.logger.Warnf("failed to start GeoIP router: %v", err)
+		return
+	}
+
+	m.mu.Lock()
+	m.geoRouter = router
+	m.mu.Unlock()
+}
+
 // createBox builds a sing-box instance from config.
 // It retries automatically when individual outbounds fail sing-box validation,
 // removing the offending outbound each time.
@@ -313,7 +428,7 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		return nil, fmt.Errorf("build sing-box options: %w", err)
 	}
 
-	const maxRetries = 200 // Increased to handle large subscription sources with many invalid nodes
+	maxRetries := len(cfg.Nodes)*3 + 50 // Dynamically scale retries to configuration size
 	outboundErrRe := regexp.MustCompile(`initialize outbound\[(\d+)\]`)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -352,14 +467,50 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		// Remove the offending outbound
 		opts.Outbounds = append(opts.Outbounds[:idx], opts.Outbounds[idx+1:]...)
 
-		// Also remove the tag from any pool outbound's member list
-		for i := range opts.Outbounds {
-			if opts.Outbounds[i].Type == pool.Type {
-				if poolOpts, ok := opts.Outbounds[i].Options.(*pool.Options); ok {
+		// Clean up pool outbounds that contained this tag
+		var newOutbounds []option.Outbound
+		var removedPoolTags []string
+		for _, ob := range opts.Outbounds {
+			if ob.Type == pool.Type {
+				if poolOpts, ok := ob.Options.(*pool.Options); ok {
 					poolOpts.Members = removeFromSlice(poolOpts.Members, badTag)
 					delete(poolOpts.Metadata, badTag)
+					
+					// If the pool is now empty, remove it to avoid another validation error
+					if len(poolOpts.Members) == 0 {
+						log.Printf("⚠️  Removing empty pool '%s'", ob.Tag)
+						removedPoolTags = append(removedPoolTags, ob.Tag)
+						continue // skip adding this empty pool
+					}
 				}
 			}
+			newOutbounds = append(newOutbounds, ob)
+		}
+		opts.Outbounds = newOutbounds
+
+		// Also remove any routes that pointed to the removed pools or the badTag
+		if (len(removedPoolTags) > 0 || badTag != "") && opts.Route != nil {
+			removedSet := make(map[string]bool)
+			for _, t := range removedPoolTags {
+				removedSet[t] = true
+			}
+			removedSet[badTag] = true
+
+			var newRules []option.Rule
+			for _, r := range opts.Route.Rules {
+				// We expect DefaultRules in our builder
+				if r.Type == C.RuleTypeDefault {
+					outboundTarget := r.DefaultOptions.RuleAction.RouteOptions.Outbound
+					if !removedSet[outboundTarget] {
+						newRules = append(newRules, r)
+					} else {
+						// Remove this rule since it points to a deleted outbound
+					}
+				} else {
+					newRules = append(newRules, r)
+				}
+			}
+			opts.Route.Rules = newRules
 		}
 	}
 
@@ -475,6 +626,10 @@ func (m *Manager) ensureMonitor(ctx context.Context) error {
 		if m.monitorServer == nil {
 			serverToStart = monitor.NewServer(m.monitorCfg, monitorMgr, log.Default())
 			m.monitorServer = serverToStart
+		}
+		// Set config early so WebUI has data before Start() completes
+		if m.monitorServer != nil && m.cfg != nil {
+			m.monitorServer.SetConfig(m.cfg)
 		}
 		// Set NodeManager for config CRUD endpoints
 		if m.monitorServer != nil {
@@ -775,6 +930,11 @@ func (m *Manager) copyConfigLocked() *config.Config {
 	}
 	cloned := *m.cfg
 	cloned.Nodes = cloneNodes(m.cfg.Nodes)
+	// Clone Subscriptions slice to avoid shared backing array issues
+	if len(m.cfg.Subscriptions) > 0 {
+		cloned.Subscriptions = make([]string, len(m.cfg.Subscriptions))
+		copy(cloned.Subscriptions, m.cfg.Subscriptions)
+	}
 	cloned.SetFilePath(m.cfg.FilePath())
 	return &cloned
 }

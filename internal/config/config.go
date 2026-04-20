@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,15 +28,26 @@ type Config struct {
 	Management          ManagementConfig          `yaml:"management"`
 	SubscriptionRefresh SubscriptionRefreshConfig `yaml:"subscription_refresh"`
 	GeoIP               GeoIPConfig               `yaml:"geoip"`
+	Log                 LogConfig                 `yaml:"log"`
 	Nodes               []NodeConfig              `yaml:"nodes"`
 	NodesFile           string                    `yaml:"nodes_file"`          // 节点文件路径，每行一个 URI
 	ExtraNodesFiles     []string                  `yaml:"extra_nodes_files"`   // 额外节点文件列表，不会被订阅覆盖
 	Subscriptions       []string                  `yaml:"subscriptions"`       // 订阅链接列表
-	ExternalIP          string                    `yaml:"external_ip"`      // 外部 IP 地址，用于导出时替换 0.0.0.0
+	ExternalIP          string                    `yaml:"external_ip"`         // 外部 IP 地址，用于导出时替换 0.0.0.0
 	LogLevel            string                    `yaml:"log_level"`
 	SkipCertVerify      bool                      `yaml:"skip_cert_verify"` // 全局跳过 SSL 证书验证
 
 	filePath string `yaml:"-"` // 配置文件路径，用于保存
+}
+
+// LogConfig controls log output and rotation.
+type LogConfig struct {
+	Output     string `yaml:"output"`      // 日志输出: "stdout", "file", 默认 "stdout"
+	File       string `yaml:"file"`        // 日志文件路径，默认 "logs/easy_proxies.log"
+	MaxSize    int    `yaml:"max_size"`    // 单个日志文件最大 MB，默认 50
+	MaxBackups int    `yaml:"max_backups"` // 保留旧日志文件个数，默认 3
+	MaxAge     int    `yaml:"max_age"`     // 保留旧日志文件天数，默认 7
+	Compress   bool   `yaml:"compress"`    // 是否压缩旧日志，默认 false
 }
 
 // GeoIPConfig controls GeoIP-based region routing.
@@ -43,7 +55,7 @@ type GeoIPConfig struct {
 	Enabled            bool          `yaml:"enabled"`              // 是否启用 GeoIP 地域分区
 	DatabasePath       string        `yaml:"database_path"`        // GeoLite2-Country.mmdb 文件路径
 	Listen             string        `yaml:"listen"`               // GeoIP 路由监听地址，默认使用 listener 配置
-	Port               uint16        `yaml:"port"`                 // GeoIP 路由监听端口，默认 2323
+	Port               uint16        `yaml:"port"`                 // GeoIP 路由监听端口，默认 1221
 	AutoUpdateEnabled  bool          `yaml:"auto_update_enabled"`  // 是否启用自动更新数据库
 	AutoUpdateInterval time.Duration `yaml:"auto_update_interval"` // 自动更新间隔，默认 24 小时
 }
@@ -304,6 +316,14 @@ func (c *Config) normalize() error {
 			}
 		}
 		c.Nodes = append(c.Nodes, subNodes...)
+		// Fallback: if all subscriptions failed, try loading cached nodes.txt
+		if len(subNodes) == 0 && c.NodesFile != "" {
+			cachedNodes, err := LoadNodesFromFile(c.NodesFile)
+			if err == nil && len(cachedNodes) > 0 {
+				log.Printf("⚠️  All subscriptions failed, using %d cached nodes from %s", len(cachedNodes), c.NodesFile)
+				c.Nodes = append(c.Nodes, cachedNodes...)
+			}
+		}
 	}
 
 	// Load extra nodes from additional files (never overwritten by subscriptions)
@@ -367,6 +387,9 @@ func (c *Config) normalize() error {
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
+
+	// Log config defaults
+	c.normalizeLogConfig()
 
 	// Auto-fix port conflicts in hybrid mode (pool port vs multi-port)
 	if c.Mode == "hybrid" {
@@ -539,7 +562,32 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 		c.LogLevel = "info"
 	}
 
+	c.normalizeLogConfig()
+
 	return nil
+}
+
+// normalizeLogConfig applies defaults to the log config.
+func (c *Config) normalizeLogConfig() {
+	if c.Log.Output == "" {
+		c.Log.Output = "stdout"
+	}
+	if c.Log.File == "" {
+		c.Log.File = "logs/easy_proxies.log"
+	}
+	// Resolve relative log file path against config dir
+	if c.filePath != "" && !filepath.IsAbs(c.Log.File) {
+		c.Log.File = filepath.Join(filepath.Dir(c.filePath), c.Log.File)
+	}
+	if c.Log.MaxSize <= 0 {
+		c.Log.MaxSize = 50
+	}
+	if c.Log.MaxBackups <= 0 {
+		c.Log.MaxBackups = 3
+	}
+	if c.Log.MaxAge <= 0 {
+		c.Log.MaxAge = 7
+	}
 }
 
 // ManagementEnabled reports whether the monitoring endpoint should run.
@@ -575,8 +623,10 @@ func loadNodesFromSubscription(subURL string, timeout time.Duration) ([]NodeConf
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	// Set common headers to avoid being blocked
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	// Use clash-compatible User-Agent to get Clash YAML format from subscription servers
+	// This ensures we receive structured YAML with all proxy types (AnyTLS, TUIC, etc.)
+	// instead of base64-encoded content that may only contain basic SS nodes
+	req.Header.Set("User-Agent", "clash-verge/v2.2.3")
 	req.Header.Set("Accept", "*/*")
 
 	resp, err := client.Do(req)
@@ -604,8 +654,8 @@ func loadNodesFromSubscription(subURL string, timeout time.Duration) ([]NodeConf
 func parseSubscriptionContent(content string) ([]NodeConfig, error) {
 	content = strings.TrimSpace(content)
 
-	// Quick check for YAML format (check first 200 chars for "proxies:")
-	sampleSize := 200
+	// Quick check for YAML format (check first 16384 chars for "proxies:")
+	sampleSize := 16384
 	if len(content) < sampleSize {
 		sampleSize = len(content)
 	}
@@ -693,7 +743,7 @@ func isBase64(s string) bool {
 
 // IsProxyURI checks if a string is a valid proxy URI
 func IsProxyURI(s string) bool {
-	schemes := []string{"vmess://", "vless://", "trojan://", "ss://", "ssr://", "hysteria://", "hysteria2://", "hy2://", "socks5://", "socks://", "http://", "https://"}
+	schemes := []string{"vmess://", "vless://", "trojan://", "ss://", "ssr://", "hysteria://", "hysteria2://", "hy2://", "tuic://", "socks5://", "socks://", "http://", "https://", "anytls://"}
 	lower := strings.ToLower(s)
 	for _, scheme := range schemes {
 		if strings.HasPrefix(lower, scheme) {
@@ -704,32 +754,60 @@ func IsProxyURI(s string) bool {
 }
 
 // clashConfig represents a minimal Clash configuration for parsing proxies
+// flexInt handles YAML values that may be either int or quoted string.
+type flexInt int
+
+func (fi *flexInt) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var intVal int
+	if err := unmarshal(&intVal); err == nil {
+		*fi = flexInt(intVal)
+		return nil
+	}
+	var strVal string
+	if err := unmarshal(&strVal); err != nil {
+		return fmt.Errorf("cannot unmarshal port: expected int or string")
+	}
+	parsed, err := strconv.Atoi(strVal)
+	if err != nil {
+		return fmt.Errorf("cannot parse port %q as int: %w", strVal, err)
+	}
+	*fi = flexInt(parsed)
+	return nil
+}
+
 type clashConfig struct {
 	Proxies []clashProxy `yaml:"proxies"`
 }
 
 type clashProxy struct {
-	Name           string                 `yaml:"name"`
-	Type           string                 `yaml:"type"`
-	Server         string                 `yaml:"server"`
-	Port           int                    `yaml:"port"`
-	UUID           string                 `yaml:"uuid"`
-	Password       string                 `yaml:"password"`
-	Cipher         string                 `yaml:"cipher"`
-	AlterId        int                    `yaml:"alterId"`
-	Network        string                 `yaml:"network"`
-	TLS            bool                   `yaml:"tls"`
-	SkipCertVerify bool                   `yaml:"skip-cert-verify"`
-	ServerName     string                 `yaml:"servername"`
-	SNI            string                 `yaml:"sni"`
-	Flow           string                 `yaml:"flow"`
-	UDP            bool                   `yaml:"udp"`
-	WSOpts         *clashWSOptions        `yaml:"ws-opts"`
-	GrpcOpts       *clashGrpcOptions      `yaml:"grpc-opts"`
-	RealityOpts    *clashRealityOptions   `yaml:"reality-opts"`
-	ClientFingerprint string              `yaml:"client-fingerprint"`
-	Plugin         string                 `yaml:"plugin"`
-	PluginOpts     map[string]interface{} `yaml:"plugin-opts"`
+	Name              string                 `yaml:"name"`
+	Type              string                 `yaml:"type"`
+	Server            string                 `yaml:"server"`
+	Port              flexInt                `yaml:"port"`
+	Ports             string                 `yaml:"ports"`
+	UUID              string                 `yaml:"uuid"`
+	Password          string                 `yaml:"password"`
+	Cipher            string                 `yaml:"cipher"`
+	AlterId           int                    `yaml:"alterId"`
+	Network           string                 `yaml:"network"`
+	TLS               bool                   `yaml:"tls"`
+	SkipCertVerify    bool                   `yaml:"skip-cert-verify"`
+	ServerName        string                 `yaml:"servername"`
+	SNI               string                 `yaml:"sni"`
+	Flow              string                 `yaml:"flow"`
+	UDP               bool                   `yaml:"udp"`
+	WSOpts            *clashWSOptions        `yaml:"ws-opts"`
+	GrpcOpts          *clashGrpcOptions      `yaml:"grpc-opts"`
+	RealityOpts       *clashRealityOptions   `yaml:"reality-opts"`
+	ClientFingerprint string                 `yaml:"client-fingerprint"`
+	Obfs              string                 `yaml:"obfs"`
+	ObfsPassword      string                 `yaml:"obfs-password"`
+	Plugin            string                 `yaml:"plugin"`
+	PluginOpts        map[string]interface{} `yaml:"plugin-opts"`
+	// TUIC-specific fields
+	ALPN                 []string `yaml:"alpn"`
+	CongestionController string   `yaml:"congestion-controller"`
+	UDPRelayMode         string   `yaml:"udp-relay-mode"`
 }
 
 type clashWSOptions struct {
@@ -776,10 +854,14 @@ func convertClashProxyToURI(p clashProxy) string {
 		return buildVLESSURI(p)
 	case "trojan":
 		return buildTrojanURI(p)
+	case "anytls":
+		return buildAnyTLSURI(p)
 	case "ss", "shadowsocks":
 		return buildShadowsocksURI(p)
 	case "hysteria2", "hy2":
 		return buildHysteria2URI(p)
+	case "tuic":
+		return buildTUICURI(p)
 	default:
 		return ""
 	}
@@ -815,7 +897,7 @@ func buildVMessURI(p clashProxy) string {
 		query = "?" + params.Encode()
 	}
 
-	return fmt.Sprintf("vmess://%s@%s:%d%s#%s", p.UUID, p.Server, p.Port, query, url.QueryEscape(p.Name))
+	return fmt.Sprintf("vmess://%s@%s:%d%s#%s", p.UUID, p.Server, int(p.Port), query, url.QueryEscape(p.Name))
 }
 
 func buildVLESSURI(p clashProxy) string {
@@ -863,14 +945,11 @@ func buildVLESSURI(p clashProxy) string {
 		params.Set("fp", p.ClientFingerprint)
 	}
 
-	return fmt.Sprintf("vless://%s@%s:%d?%s#%s", p.UUID, p.Server, p.Port, params.Encode(), url.QueryEscape(p.Name))
+	return fmt.Sprintf("vless://%s@%s:%d?%s#%s", p.UUID, p.Server, int(p.Port), params.Encode(), url.QueryEscape(p.Name))
 }
 
 func buildTrojanURI(p clashProxy) string {
 	params := url.Values{}
-	if p.Network != "" && p.Network != "tcp" {
-		params.Set("type", p.Network)
-	}
 	if p.ServerName != "" {
 		params.Set("sni", p.ServerName)
 	} else if p.SNI != "" {
@@ -878,6 +957,9 @@ func buildTrojanURI(p clashProxy) string {
 	}
 	if p.SkipCertVerify {
 		params.Set("allowInsecure", "1")
+	}
+	if p.Network != "" && p.Network != "tcp" {
+		params.Set("type", p.Network)
 	}
 	if p.WSOpts != nil {
 		if p.WSOpts.Path != "" {
@@ -896,13 +978,35 @@ func buildTrojanURI(p clashProxy) string {
 		query = "?" + params.Encode()
 	}
 
-	return fmt.Sprintf("trojan://%s@%s:%d%s#%s", p.Password, p.Server, p.Port, query, url.QueryEscape(p.Name))
+	return fmt.Sprintf("trojan://%s@%s:%d%s#%s", p.Password, p.Server, int(p.Port), query, url.QueryEscape(p.Name))
+}
+
+func buildAnyTLSURI(p clashProxy) string {
+	params := url.Values{}
+	if p.ServerName != "" {
+		params.Set("sni", p.ServerName)
+	} else if p.SNI != "" {
+		params.Set("sni", p.SNI)
+	}
+	if p.SkipCertVerify {
+		params.Set("allowInsecure", "1")
+	}
+	if p.ClientFingerprint != "" {
+		params.Set("fp", p.ClientFingerprint)
+	}
+
+	query := ""
+	if len(params) > 0 {
+		query = "?" + params.Encode()
+	}
+
+	return fmt.Sprintf("anytls://%s@%s:%d%s#%s", p.Password, p.Server, int(p.Port), query, url.QueryEscape(p.Name))
 }
 
 func buildShadowsocksURI(p clashProxy) string {
 	// Encode method:password in base64
 	userInfo := base64.StdEncoding.EncodeToString([]byte(p.Cipher + ":" + p.Password))
-	return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, p.Server, p.Port, url.QueryEscape(p.Name))
+	return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, p.Server, int(p.Port), url.QueryEscape(p.Name))
 }
 
 func buildHysteria2URI(p clashProxy) string {
@@ -915,13 +1019,83 @@ func buildHysteria2URI(p clashProxy) string {
 	if p.SkipCertVerify {
 		params.Set("insecure", "1")
 	}
+	if p.Obfs != "" {
+		params.Set("obfs", p.Obfs)
+		if p.ObfsPassword != "" {
+			params.Set("obfs-password", p.ObfsPassword)
+		}
+	}
+	if strings.TrimSpace(p.Ports) != "" {
+		params.Set("ports", normalizeHysteria2PortsValue(strings.TrimSpace(p.Ports)))
+	}
 
 	query := ""
 	if len(params) > 0 {
 		query = "?" + params.Encode()
 	}
 
-	return fmt.Sprintf("hysteria2://%s@%s:%d%s#%s", p.Password, p.Server, p.Port, query, url.QueryEscape(p.Name))
+	port := int(p.Port)
+	if port <= 0 {
+		port = 443
+	}
+
+	return fmt.Sprintf("hysteria2://%s@%s:%d%s#%s", p.Password, p.Server, port, query, url.QueryEscape(p.Name))
+}
+
+func normalizeHysteria2PortsValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	parts := strings.Split(value, ",")
+	normalized := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, ":") {
+			normalized = append(normalized, part)
+			continue
+		}
+		if strings.Count(part, "-") == 1 {
+			normalized = append(normalized, strings.Replace(part, "-", ":", 1))
+			continue
+		}
+		normalized = append(normalized, part)
+	}
+
+	return strings.Join(normalized, ",")
+}
+
+func buildTUICURI(p clashProxy) string {
+	params := url.Values{}
+	if p.ServerName != "" {
+		params.Set("sni", p.ServerName)
+	} else if p.SNI != "" {
+		params.Set("sni", p.SNI)
+	}
+	if p.SkipCertVerify {
+		params.Set("allowInsecure", "1")
+	}
+	if p.CongestionController != "" {
+		params.Set("congestion_control", p.CongestionController)
+	}
+	if p.UDPRelayMode != "" {
+		params.Set("udp_relay_mode", p.UDPRelayMode)
+	}
+	if len(p.ALPN) > 0 {
+		params.Set("alpn", strings.Join(p.ALPN, ","))
+	}
+
+	query := ""
+	if len(params) > 0 {
+		query = "?" + params.Encode()
+	}
+
+	// TUIC URI format: tuic://uuid:password@server:port?params#name
+	return fmt.Sprintf("tuic://%s:%s@%s:%d%s#%s", p.UUID, p.Password, p.Server, int(p.Port), query, url.QueryEscape(p.Name))
 }
 
 // FilePath returns the config file path.
@@ -1055,6 +1229,15 @@ func (c *Config) SaveSettings() error {
 	saveCfg.ExternalIP = c.ExternalIP
 	saveCfg.Management.ProbeTarget = c.Management.ProbeTarget
 	saveCfg.SkipCertVerify = c.SkipCertVerify
+	saveCfg.Log = c.Log
+	saveCfg.Subscriptions = c.Subscriptions
+	saveCfg.SubscriptionRefresh = c.SubscriptionRefresh
+	saveCfg.GeoIP = c.GeoIP
+	saveCfg.Mode = c.Mode
+	saveCfg.Listener = c.Listener
+	saveCfg.MultiPort = c.MultiPort
+	saveCfg.Pool = c.Pool
+	saveCfg.Management = c.Management
 
 	newData, err := yaml.Marshal(&saveCfg)
 	if err != nil {

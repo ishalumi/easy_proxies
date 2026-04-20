@@ -335,7 +335,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 		// Log GeoIP routing info
 		geoipPort := cfg.GeoIP.Port
 		if geoipPort == 0 {
-			geoipPort = cfg.Listener.Port
+			geoipPort = 1221 // Default GeoIP router port
 		}
 		geoipListen := cfg.GeoIP.Listen
 		if geoipListen == "" {
@@ -343,7 +343,7 @@ func Build(cfg *config.Config) (option.Options, error) {
 		}
 		log.Println("🌐 GeoIP Region Routing Enabled:")
 		log.Printf("   Access via: http://%s:%d/{region}", geoipListen, geoipPort)
-		log.Println("   Available regions: /jp, /kr, /us, /hk, /tw, /other")
+		log.Println("   Available regions: /jp, /kr, /us, /hk, /tw, /sg, /other")
 		log.Println("   Default (no path): all nodes pool")
 	}
 
@@ -352,6 +352,11 @@ func Build(cfg *config.Config) (option.Options, error) {
 		Inbounds:  inbounds,
 		Outbounds: outbounds,
 		Route:     &route,
+		Experimental: &option.ExperimentalOptions{
+			ClashAPI: &option.ClashAPIOptions{
+				ExternalController: "127.0.0.1:9092",
+			},
+		},
 	}
 	return opts, nil
 }
@@ -386,7 +391,14 @@ func buildPoolInbound(cfg *config.Config) (option.Inbound, error) {
 func buildNodeOutbound(tag, rawURI string, skipCertVerify bool) (option.Outbound, error) {
 	parsed, err := url.Parse(rawURI)
 	if err != nil {
-		return option.Outbound{}, fmt.Errorf("parse uri: %w", err)
+		normalizedURI, normalized := normalizeHysteria2PortHoppingURI(rawURI)
+		if !normalized {
+			return option.Outbound{}, fmt.Errorf("parse uri: %w", err)
+		}
+		parsed, err = url.Parse(normalizedURI)
+		if err != nil {
+			return option.Outbound{}, fmt.Errorf("parse uri: %w", err)
+		}
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "vless":
@@ -413,6 +425,18 @@ func buildNodeOutbound(tag, rawURI string, skipCertVerify bool) (option.Outbound
 			return option.Outbound{}, err
 		}
 		return option.Outbound{Type: C.TypeTrojan, Tag: tag, Options: &opts}, nil
+	case "anytls":
+		opts, err := buildAnyTLSOptions(parsed, skipCertVerify)
+		if err != nil {
+			return option.Outbound{}, err
+		}
+		return option.Outbound{Type: C.TypeAnyTLS, Tag: tag, Options: &opts}, nil
+	case "tuic":
+		opts, err := buildTUICOptions(parsed, skipCertVerify)
+		if err != nil {
+			return option.Outbound{}, err
+		}
+		return option.Outbound{Type: C.TypeTUIC, Tag: tag, Options: &opts}, nil
 	case "vmess":
 		opts, err := buildVMessOptions(rawURI, skipCertVerify)
 		if err != nil {
@@ -484,14 +508,33 @@ func buildVLESSOptions(u *url.URL, skipCertVerify bool) (option.VLESSOutboundOpt
 
 func buildHysteria2Options(u *url.URL, skipCertVerify bool) (option.Hysteria2OutboundOptions, error) {
 	password := u.User.String()
-	server, port, err := hostPort(u, 443)
+	server, port, hopPorts, err := hysteria2HostPort(u, 443)
 	if err != nil {
 		return option.Hysteria2OutboundOptions{}, err
 	}
 	query := u.Query()
+	hopPorts = appendUniqueStrings(hopPorts, parseHysteria2Ports(query.Get("ports"))...)
+	hopPorts = appendUniqueStrings(hopPorts, parseHysteria2Ports(query.Get("server_ports"))...)
+	hopPorts = appendUniqueStrings(hopPorts, parseHysteria2Ports(query.Get("mport"))...)
 	opts := option.Hysteria2OutboundOptions{
 		ServerOptions: option.ServerOptions{Server: server, ServerPort: uint16(port)},
 		Password:      password,
+	}
+	if len(hopPorts) > 0 {
+		opts.ServerPorts = badoption.Listable[string](hopPorts)
+	}
+	if hopInterval := query.Get("hop_interval"); hopInterval != "" {
+		d, err := time.ParseDuration(hopInterval)
+		if err != nil {
+			return option.Hysteria2OutboundOptions{}, fmt.Errorf("invalid hop_interval %q: %w", hopInterval, err)
+		}
+		opts.HopInterval = badoption.Duration(d)
+	} else if hopInterval := query.Get("hopInterval"); hopInterval != "" {
+		d, err := time.ParseDuration(hopInterval)
+		if err != nil {
+			return option.Hysteria2OutboundOptions{}, fmt.Errorf("invalid hopInterval %q: %w", hopInterval, err)
+		}
+		opts.HopInterval = badoption.Duration(d)
 	}
 	if up := query.Get("upMbps"); up != "" {
 		opts.UpMbps = atoiDefault(up)
@@ -713,6 +756,92 @@ func buildTrojanOptions(u *url.URL, skipCertVerify bool) (option.TrojanOutboundO
 	} else if transport != nil {
 		opts.Transport = transport
 	}
+
+	return opts, nil
+}
+
+func buildAnyTLSOptions(u *url.URL, skipCertVerify bool) (option.AnyTLSOutboundOptions, error) {
+	password := u.User.Username()
+	if password == "" {
+		password, _ = u.User.Password()
+	}
+
+	server, port, err := hostPort(u, 443)
+	if err != nil {
+		return option.AnyTLSOutboundOptions{}, err
+	}
+
+	query := u.Query()
+	opts := option.AnyTLSOutboundOptions{
+		ServerOptions: option.ServerOptions{Server: server, ServerPort: uint16(port)},
+		Password:      password,
+	}
+
+	// Parse TLS options
+	if tlsOptions, err := buildTLSOptions(query, skipCertVerify); err != nil {
+		return option.AnyTLSOutboundOptions{}, err
+	} else if tlsOptions != nil {
+		opts.OutboundTLSOptionsContainer = option.OutboundTLSOptionsContainer{TLS: tlsOptions}
+	} else {
+		// AnyTLS defaults to TLS enabled
+		opts.OutboundTLSOptionsContainer = option.OutboundTLSOptionsContainer{
+			TLS: &option.OutboundTLSOptions{
+				Enabled:    true,
+				ServerName: server,
+				Insecure:   skipCertVerify,
+			},
+		}
+	}
+
+	return opts, nil
+}
+
+func buildTUICOptions(u *url.URL, skipCertVerify bool) (option.TUICOutboundOptions, error) {
+	uuid := u.User.Username()
+	password, _ := u.User.Password()
+
+	server, port, err := hostPort(u, 443)
+	if err != nil {
+		return option.TUICOutboundOptions{}, err
+	}
+
+	query := u.Query()
+	opts := option.TUICOutboundOptions{
+		ServerOptions: option.ServerOptions{Server: server, ServerPort: uint16(port)},
+		UUID:          uuid,
+		Password:      password,
+	}
+
+	// Congestion control (bbr, cubic, new_reno)
+	if cc := query.Get("congestion_control"); cc != "" {
+		opts.CongestionControl = cc
+	}
+
+	// UDP relay mode (native, quic)
+	if udpMode := query.Get("udp_relay_mode"); udpMode != "" {
+		opts.UDPRelayMode = udpMode
+	}
+
+	// TLS options (TUIC always uses TLS)
+	tlsOptions := &option.OutboundTLSOptions{
+		Enabled:    true,
+		ServerName: server,
+		Insecure:   skipCertVerify,
+	}
+	if sni := query.Get("sni"); sni != "" {
+		tlsOptions.ServerName = sni
+	}
+	insecure := query.Get("allowInsecure")
+	if insecure == "" {
+		insecure = query.Get("insecure")
+	}
+	if insecure != "" {
+		tlsOptions.Insecure = insecure == "1" || strings.EqualFold(insecure, "true")
+	}
+	if alpn := query.Get("alpn"); alpn != "" {
+		tlsOptions.ALPN = badoption.Listable[string](strings.Split(alpn, ","))
+	}
+	opts.OutboundTLSOptionsContainer = option.OutboundTLSOptionsContainer{TLS: tlsOptions}
 
 	return opts, nil
 }
@@ -963,6 +1092,154 @@ func hostPort(u *url.URL, defaultPort int) (string, int, error) {
 		return "", 0, fmt.Errorf("invalid port %q", portStr)
 	}
 	return host, port, nil
+}
+
+func normalizeHysteria2PortHoppingURI(rawURI string) (string, bool) {
+	lowerURI := strings.ToLower(rawURI)
+	if !strings.HasPrefix(lowerURI, "hysteria2://") && !strings.HasPrefix(lowerURI, "hy2://") {
+		return "", false
+	}
+
+	schemeSep := strings.Index(rawURI, "://")
+	if schemeSep == -1 {
+		return "", false
+	}
+
+	scheme := rawURI[:schemeSep]
+	rest := rawURI[schemeSep+3:]
+
+	fragment := ""
+	if idx := strings.Index(rest, "#"); idx != -1 {
+		fragment = rest[idx:]
+		rest = rest[:idx]
+	}
+
+	rawQuery := ""
+	if idx := strings.Index(rest, "?"); idx != -1 {
+		rawQuery = rest[idx+1:]
+		rest = rest[:idx]
+	}
+
+	atIdx := strings.LastIndex(rest, "@")
+	if atIdx == -1 {
+		return "", false
+	}
+	userInfo := rest[:atIdx]
+	authority := rest[atIdx+1:]
+
+	portSep := strings.LastIndex(authority, ":")
+	if portSep == -1 {
+		return "", false
+	}
+	host := authority[:portSep]
+	rawPort := strings.TrimSpace(authority[portSep+1:])
+	if host == "" || rawPort == "" {
+		return "", false
+	}
+
+	if _, err := strconv.Atoi(rawPort); err == nil {
+		return "", false
+	}
+	if !looksLikeHysteria2PortSet(rawPort) {
+		return "", false
+	}
+
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		values = url.Values{}
+	}
+	if strings.TrimSpace(values.Get("ports")) == "" && strings.TrimSpace(values.Get("server_ports")) == "" && strings.TrimSpace(values.Get("mport")) == "" {
+		values.Set("ports", rawPort)
+	}
+
+	normalizedURI := fmt.Sprintf("%s://%s@%s:%d", scheme, userInfo, host, 443)
+	if encoded := values.Encode(); encoded != "" {
+		normalizedURI += "?" + encoded
+	}
+	normalizedURI += fragment
+
+	return normalizedURI, true
+}
+
+func looksLikeHysteria2PortSet(v string) bool {
+	if v == "" {
+		return false
+	}
+	for _, r := range v {
+		if (r >= '0' && r <= '9') || r == '-' || r == ',' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func hysteria2HostPort(u *url.URL, defaultPort int) (string, int, []string, error) {
+	host := u.Hostname()
+	if host == "" {
+		return "", 0, nil, errors.New("missing host")
+	}
+
+	port := defaultPort
+	var hopPorts []string
+	rawPort := strings.TrimSpace(u.Port())
+	if rawPort == "" {
+		return host, port, hopPorts, nil
+	}
+
+	if numericPort, err := strconv.Atoi(rawPort); err == nil {
+		return host, numericPort, hopPorts, nil
+	}
+
+	hopPorts = append(hopPorts, rawPort)
+	return host, port, hopPorts, nil
+}
+
+func parseHysteria2Ports(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	ports := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			ports = append(ports, normalizeHysteria2PortRange(part))
+		}
+	}
+	return ports
+}
+
+func normalizeHysteria2PortRange(portRange string) string {
+	if strings.Contains(portRange, ":") {
+		return portRange
+	}
+	if strings.Count(portRange, "-") == 1 {
+		return strings.Replace(portRange, "-", ":", 1)
+	}
+	return portRange
+}
+
+func appendUniqueStrings(base []string, values ...string) []string {
+	if len(values) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base))
+	for _, item := range base {
+		seen[item] = struct{}{}
+	}
+	for _, item := range values {
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		base = append(base, item)
+	}
+	return base
 }
 
 // normalizeShadowsocksMethod maps common Shadowsocks method aliases to the
