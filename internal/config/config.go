@@ -605,7 +605,7 @@ func LoadNodesFromFile(path string) ([]NodeConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseNodesFromContent(string(data))
+	return parseSubscriptionContent(string(data))
 }
 
 // loadNodesFromSubscription fetches and parses nodes from a subscription URL
