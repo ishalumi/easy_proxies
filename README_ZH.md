@@ -15,6 +15,9 @@ Easy Proxies 是一个基于 sing-box 的代理池管理工具。
   - `nodes_file`（每行一个 URI）
   - `subscriptions`（支持 Base64/纯文本/Clash YAML 解析）
 - 自动健康检查、失败熔断和黑名单恢复。
+- 拨号失败自动重试：节点拨号失败时自动切换到另一个健康节点重试（可配置次数）。
+- 端口稳定（multi-port/hybrid）：每个节点按 URI 稳定标识（忽略名称与参数顺序），订阅刷新或重启后保持同一本地端口（持久化到 config.yaml 同目录的 `node_ports.json`）。
+- 粘性代理：可选的独立端口，按来源 IP 把客户端固定绑定到同一上游节点，保持出口 IP 稳定，与轮询的 pool 入口共存（仅 pool/hybrid 模式）。
 - Web 管理面板 + API：
   - 节点状态/探测/导出
   - **手动拉黑/解封节点**
@@ -37,13 +40,13 @@ cp nodes.example nodes.txt
 
 编辑 `config.yaml`，并配置节点来源（`nodes.txt` / `subscriptions` / `nodes`）。
 
+> 为什么要 `touch nodes.txt`？如果你用文件级挂载（如 `-v ./data/nodes.txt:/etc/easy_proxies/nodes.txt`）而宿主机上该文件不存在，Docker 会在宿主机上创建一个名为 `nodes.txt` 的**目录**并挂载进去，容器内就出现"本应是文件却是目录"的坑。预先创建文件（或直接挂载**目录** `./data:/etc/easy_proxies`，首启动会自动生成文件）可避免。若已踩坑：`rm -rf ./data/nodes.txt && touch ./data/nodes.txt` 后重启。
+
 ### 2）启动
 
 Docker：
 
 ```bash
-./start.sh
-# 或
 docker compose up -d
 ```
 
@@ -65,9 +68,11 @@ listener:
   password: pass
 
 pool:
-  mode: sequential    # sequential / random / balance
+  mode: sequential    # sequential / random / balance / latency
   failure_threshold: 3
   blacklist_duration: 24h
+  retry_enabled: true # 拨号失败时切换到另一节点重试
+  retry_attempts: 3   # 每个请求的最大拨号次数
 
 management:
   enabled: true
@@ -81,6 +86,16 @@ dns:
   strategy: prefer_ipv4
 
 nodes_file: nodes.txt
+```
+
+## 粘性代理（可选，仅 Pool/Hybrid 模式）
+
+开启后会额外监听一个独立端口（默认 `listener.port + 1`，即 `2324`），与原 `2323` 端口共存。通过粘性端口接入的客户端会按**来源 IP** 固定绑定到同一个上游节点，保持出口 IP 稳定（避免轮询导致 IP 频繁跳变触发风控/掉登录态）。绑定为永久保持，仅当该节点被拉黑/移除时才重新选择。监听地址与认证复用 `listener` 配置。
+
+```yaml
+sticky:
+  enabled: true
+  port: 2324    # 留空或 0 则默认为 listener.port + 1
 ```
 
 ## DNS 配置说明
@@ -119,7 +134,14 @@ dns:
   - 会抓取订阅节点并追加到运行节点列表
   - `nodes_file` 作为订阅节点写入路径
   - 启动阶段不再从 `nodes_file` 读取节点
+  - 可通过 `subscription_refresh.fetch_concurrency` 调整订阅抓取并发数（默认 16，最大 32）
 - `nodes`（内联节点）只要存在就会参与运行。
+- **多来源节点合并**：当同时配置 `nodes` 和 `subscriptions` 时：
+  - 内联节点（config.yaml 中的 `nodes`）和订阅节点会合并使用
+  - 订阅更新时会保留内联节点，不会覆盖
+  - 节点顺序：内联节点在前，订阅节点在后
+  - 各节点的来源标识（inline/subscription）会在管理界面中显示
+- **端口稳定**（multi-port/hybrid）：节点按 URI 稳定标识（忽略名称与参数顺序），订阅改名或重排都保持同一本地端口；分配结果保存到 config.yaml 同目录的 `node_ports.json`，重启后自动恢复。删除该文件可强制重新分配。
 
 ## 协议支持注意事项
 
@@ -129,8 +151,10 @@ dns:
 - `vless`
 - `trojan`
 - `ss` / `shadowsocks`
+  - 支持 SIP002：`ss://base64(method:password)@server:port#name`
+  - 支持旧格式：`ss://base64(method:password@server:port)#name`
 - `hysteria2` / `hy2`
-- `socks5` / `socks`
+- `socks5` / `socks5h` / `socks`
 - `http` / `https`
 - `anytls`
 - `tuic`
@@ -161,6 +185,103 @@ dns:
 - 省略项默认值可在 `internal/config/config.go` 中查看。
 - 日志轮转通过 `log` 配置段设置；当 `output: file` 时，日志同时写入控制台和文件，并自动轮转。
 
+## 常见问题
+
+### 配置持久化问题
+
+**问题描述**：在 Docker 环境中通过 WebUI 修改配置后，重启或重建容器时配置被重置。
+
+**快速诊断**：
+```bash
+# 检查 data 目录结构和权限
+ls -la data/
+[ -f data/config.yaml ]  || echo "缺少 data/config.yaml"
+[ -d data/config.yaml ]   && echo "异常：data/config.yaml 是目录（见快速开始说明）"
+[ -d data/nodes.txt ]    && echo "异常：data/nodes.txt 是目录（见快速开始说明）"
+```
+
+**常见原因和解决方案**：
+
+1. **文件权限问题**：
+   ```bash
+   # 修复权限
+   chown -R $(id -u):$(id -g) data
+   chmod 755 data
+   chmod 644 data/config.yaml data/nodes.txt
+   ```
+
+2. **卷映射错误**：
+   - 确保 `docker-compose.yml` 中使用 `./data:/etc/easy_proxies`
+   - 不要使用绝对路径或错误的目录
+
+3. **启动时未传递 UID/GID**：
+   ```bash
+   # 正确的启动方式
+   UID=$(id -u) GID=$(id -g) docker-compose up -d
+   ```
+
+**验证配置是否保存**：
+```bash
+# 查看文件修改时间
+ls -lh data/config.yaml data/nodes.txt
+
+# 查看容器日志，确认保存成功
+docker-compose logs -f | grep "Saved"
+```
+
+**详细故障排查**：参见 [docs/troubleshooting-persistence.md](docs/troubleshooting-persistence.md)
+
+### Docker 权限问题
+
+**问题描述**：使用 `docker-compose.yml` 映射配置目录时，可能遇到 "permission denied" 或 "cannot write to /etc/easy_proxies" 等权限错误。
+
+**原因分析**：容器以非 root 用户运行（docker-compose.yml 中指定 `user: "${UID:-10001}:${GID:-10001}"`），但宿主机挂载目录的所有权可能不匹配。
+
+**解决方案**：
+
+1. **使用 docker compose 挂载目录（推荐）**：
+   ```bash
+   mkdir -p data logs
+   sudo chown -R $(id -u):$(id -g) data logs
+   docker compose up -d
+   ```
+   直接挂载整个 `./data` 目录，首启动会自动生成 `config.yaml` 和 `nodes.txt` 文件。
+
+2. **预先创建配置文件**（备选，适用于文件级挂载）：
+   ```bash
+   mkdir -p data
+   cp config.example.yaml data/config.yaml
+   touch data/nodes.txt
+   chown -R $(id -u):$(id -g) data
+   docker compose up -d
+   ```
+
+**docker run 命令方式**：
+```bash
+mkdir -p data logs
+chmod -R u+w data logs
+docker run --user $(id -u):$(id -g) \
+  -v $(pwd)/data:/etc/easy_proxies \
+  -v $(pwd)/logs:/app/logs \
+  --network host \
+  ghcr.io/jasonwong1991/easy_proxies:latest
+```
+
+### 其他常见问题
+
+- **"配置文件未找到"**：确保挂载目录中存在 `config.yaml` 文件
+- **"无法绑定端口"**：检查端口是否被其他服务占用
+- **"所有节点健康检查失败"**：验证代理 URI 格式正确，且上游服务器可达
+- **"代理之前正常使用，突然失效"**：检查节点是否被加入黑名单（连续失败 3 次后触发，默认持续 24 小时）
+  - **解决方案 1**：通过 WebUI 释放 - 点击节点旁边的"释放"按钮
+  - **解决方案 2**：通过 API 释放 - `POST http://localhost:9091/api/nodes/{tag}/release`
+  - **解决方案 3**：在 `config.yaml` 中降低黑名单持续时间：
+    ```yaml
+    pool:
+      blacklist_duration: 1h  # 从默认的 24h 改为 1h
+    ```
+  - 查看黑名单事件日志：`docker compose logs | grep "BLACKLISTED"`
+
 ## 更新日志
 
 详见 [CHANGELOG.md](CHANGELOG.md)。
@@ -175,7 +296,10 @@ go test ./...
 
 [![Star History Chart](https://api.star-history.com/svg?repos=jasonwong1991/easy_proxies&type=Date)](https://star-history.com/#jasonwong1991/easy_proxies&Date)
 
+## 致谢
+
+本项目基于 [sing-box](https://github.com/SagerNet/sing-box) 构建 —— 底层所有协议实现、传输层与拨号逻辑都由 sing-box 提供。特别感谢 SagerNet 团队及所有贡献者的卓越工作。
+
 ## 许可证
 
 MIT License
-

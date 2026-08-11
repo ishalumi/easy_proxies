@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Stable per-node ports**: in `multi-port`/`hybrid` mode, each node keeps the same local port across subscription refreshes and process restarts
+  - Ports are preserved by a stable node identity derived from the URI (ignoring the display name and query-parameter order), so renamed or reordered subscription nodes keep their port
+  - Assignments are persisted to `node_ports.json` next to `config.yaml` and restored on startup
+- **Shadowsocks-compatible link format**: support for additional Shadowsocks URI variants (#28)
+- **WebUI: export all nodes**: new "全部导出" button and `GET /api/export?all=true` that exports every node regardless of health (dead or alive); the default export still returns only healthy/available nodes
+- **WebUI: initial health-check progress**: the startup/periodic node sweep now publishes live progress (`done/total`, available, failed) through `GET /api/nodes` and drives the shared progress bar, so the dashboard shows "初始化探测中 N/M" instead of appearing frozen until the sweep finishes
+
+### Changed
+- **Transient failures (429 rate-limit, timeouts, connection resets) no longer trigger the 24h blacklist**: such errors are common for shared/free nodes briefly rate-limited by their CDN and usually clear on their own. They now impose only a short 60s cooldown and do not count toward the 3-strikes permanent-blacklist threshold; permanent faults (handshake/cert/protocol failures, 404, etc.) keep the original 3 → 24h behavior. This stops a burst of concurrent requests from mass-blacklisting otherwise-healthy nodes for a full day
+- Improved configuration persistence diagnostics and error handling
+- `entrypoint.sh` now detects the "bind-mount of a non-existent file → Docker creates a directory" foot-gun for `config.yaml`/`nodes.txt` and exits with an actionable fix instead of a vague runtime crash
+- Removed `start.sh` and `diagnose.sh` helper scripts; `docker compose up -d` (with a directory mount) is now the documented path. README/docs updated to inline the equivalent checks
+
+### Fixed
+- **Error messages now match actual mount configuration**: entrypoint.sh error messages previously hardcoded `./data/` paths, causing confusion when using file-mount mode (`-v ./nodes.txt:/etc/easy_proxies/nodes.txt`). Now displays correct fix instructions for both directory-mount and file-mount configurations
+
+### Fixed
+- **Initial/periodic health check hangs, leaving 0 nodes available**: `probeAllNodes` (the startup and periodic sweep) called `probe(ctx)` inline with no hard-timeout guard — a separate path from the batch probe. A protocol dial that ignores `ctx` blocked the worker forever, wedging its semaphore slot; the 32 slots filled up and the sweep stalled, so nodes stayed `initialCheckDone=false` and the dashboard showed 0 available even though manual/batch probes found thousands reachable. Each worker now races the probe against its deadline in a goroutine and always releases its slot within the timeout
+- **Batch probe hangs forever (WebUI frozen at "N/M")**: a probe against a node that stalls (accepts TCP but never responds, or a protocol dial/handshake that ignores context cancellation) could block indefinitely, so the stuck goroutines occupied every semaphore slot and `wg.Wait` never returned — freezing the run (e.g. stuck around 1600/8363). Fixed with two layers: (1) `Probe` now runs the check in its own goroutine and races it against the 10s context deadline, so it always returns even if the underlying dial ignores `ctx`; (2) a connection watchdog force-closes the probe connection when the deadline fires, unwinding the stalled goroutine (some sing-box connection types don't honor `SetDeadline`, so the deadline alone was insufficient)
+- **WebUI: dashboard blacklist/abnormal count stuck at 0**: `GET /api/nodes` returned only the filtered healthy set, so the frontend never saw blacklisted/unavailable nodes and their count always showed 0. It now returns the full node set, restoring the count and making blacklisted nodes visible in the table with a working "解封" (release) button
+- WebUI: long node names and URIs are now truncated so they no longer break the table layout
+- Prevent crash from malformed VLESS `packetEncoding` nodes
+- Preserve inline nodes when a subscription update occurs
+
+## [3.0.1] - 2026-06-17
+
+### Added
+- WebUI: sticky proxy settings are now editable from the dashboard
+
+## [3.0.0] - 2026-06-17
+
+### Added
+- **Sticky Proxy**: Optional dedicated entry port (default `listener.port + 1`, e.g. `2324`) that pins each client to a single upstream node by source IP, keeping the egress IP stable instead of rotating per connection
+  - Coexists with the regular non-sticky pool entry (`2323`) — choose per port
+  - Pin is permanent until the node is blacklisted/removed, then re-selects automatically
+  - New `sticky` config section (`enabled`, `port`); listen address and credentials inherited from `listener`
+  - Pool/hybrid mode only
 - **Log Rotation**: Configurable log file rotation with size limits, backup count, and compression
   - New `log` section in config with `output`, `file`, `max_size`, `max_backups`, `max_age`, `compress` options
   - Uses lumberjack for automatic log rotation

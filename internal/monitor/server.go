@@ -12,11 +12,10 @@ import (
 	"log"
 	mathrand "math/rand"
 	"net/http"
-	"net/http/pprof"
 	"net/url"
-	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"easy_proxies/internal/config"
@@ -44,13 +43,6 @@ type NodeManager interface {
 }
 
 // Sentinel errors for node operations.
-const (
-	minConcurrentProbes   int64 = 20
-	singleProbeTimeout          = 10 * time.Second
-	batchProbeWaveOverhead      = 2 * time.Second
-	minBatchProbeTimeout        = 10 * time.Minute
-)
-
 var (
 	ErrNodeNotFound = errors.New("节点不存在")
 	ErrNodeConflict = errors.New("节点名称或端口已存在")
@@ -78,22 +70,22 @@ type SubscriptionStatus struct {
 
 // Server exposes HTTP endpoints for monitoring.
 type Server struct {
-	cfg          Config
-	cfgMu        sync.RWMutex   // 保护动态配置字段
-	cfgSrc       *config.Config // 可持久化的配置对象
-	mgr          *Manager
-	srv          *http.Server
-	logger       *log.Logger
+	cfg    Config
+	cfgMu  sync.RWMutex   // 保护动态配置字段
+	cfgSrc *config.Config // 可持久化的配置对象
+	mgr    *Manager
+	srv    *http.Server
+	logger *log.Logger
 
 	// Session management
 	sessionMu  sync.RWMutex
 	sessions   map[string]*Session
 	sessionTTL time.Duration
-	stopCh     chan struct{} // 用于停止 cleanupExpiredSessions goroutine
 
-	// Concurrency control
-	probeSem            *semaphore.Weighted
-	maxConcurrentProbes int64
+	// probeAllInFlight bounds batch "probe all" to a single concurrent run.
+	// Without it, N simultaneous requests each spin up to `concurrency` probes,
+	// multiplying total in-flight dials and starving host fd/memory limits.
+	probeAllInFlight atomic.Bool
 
 	subRefresher SubscriptionRefresher
 	nodeMgr      NodeManager
@@ -108,21 +100,12 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 		logger = log.Default()
 	}
 
-	// Calculate max concurrent probes
-	maxConcurrentProbes := int64(runtime.NumCPU() * 4)
-	if maxConcurrentProbes < minConcurrentProbes {
-		maxConcurrentProbes = minConcurrentProbes
-	}
-
 	s := &Server{
 		cfg:        cfg,
 		mgr:        mgr,
 		logger:     logger,
 		sessions:   make(map[string]*Session),
 		sessionTTL: 24 * time.Hour,
-		stopCh:     make(chan struct{}),
-		probeSem:            semaphore.NewWeighted(maxConcurrentProbes),
-		maxConcurrentProbes: maxConcurrentProbes,
 	}
 
 	// Start session cleanup goroutine
@@ -143,17 +126,6 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/subscription/refresh", s.withAuth(s.handleSubscriptionRefresh))
 	mux.HandleFunc("/api/subscription/config", s.withAuth(s.handleSubscriptionConfig))
 	mux.HandleFunc("/api/reload", s.withAuth(s.handleReload))
-
-	// pprof 端点，用于运行时内存诊断
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
-	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
-	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
-
 	mux.HandleFunc("/api/traffic", s.withAuth(s.handleTraffic))
 	mux.HandleFunc("/api/logs", s.withAuth(s.handleLogs))
 	s.srv = &http.Server{Addr: cfg.Listen, Handler: mux}
@@ -195,6 +167,15 @@ func (s *Server) SetConfig(cfg *config.Config) {
 		s.cfg.ExternalIP = cfg.ExternalIP
 		s.cfg.ProbeTarget = cfg.Management.ProbeTarget
 		s.cfg.SkipCertVerify = cfg.SkipCertVerify
+		// Sync probe concurrency to the manager so periodic health checks pick
+		// up WebUI changes after a reload (batch probes read it per request).
+		if s.mgr != nil {
+			s.mgr.SetProbeConcurrency(cfg.ProbeConcurrencyOrDefault())
+			// Re-derive the probe destination and strict-TLS mode so changes to
+			// probe_target / skip_cert_verify take effect on the long-lived
+			// manager without a full process restart.
+			s.mgr.SetProbeTarget(cfg.Management.ProbeTarget, cfg.SkipCertVerify)
+		}
 		// Sync proxy credentials based on mode
 		if cfg.Mode == "multi-port" || cfg.Mode == "hybrid" {
 			s.cfg.ProxyUsername = cfg.MultiPort.Username
@@ -215,6 +196,18 @@ func (s *Server) getSettings() (externalIP, probeTarget string, skipCertVerify b
 		logCfg = s.cfgSrc.Log
 	}
 	return s.cfg.ExternalIP, s.cfg.ProbeTarget, s.cfg.SkipCertVerify, logCfg
+}
+
+// currentProbeConcurrency returns the probe concurrency from the live config,
+// clamped to a safe range. Read per batch-probe request so WebUI changes apply
+// after a reload without restarting the process.
+func (s *Server) currentProbeConcurrency() int64 {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	if s.cfgSrc != nil {
+		return int64(s.cfgSrc.ProbeConcurrencyOrDefault())
+	}
+	return 32
 }
 
 // updateSettings updates dynamic settings and persists to config file.
@@ -288,12 +281,6 @@ func (s *Server) Shutdown(ctx context.Context) {
 	if s == nil || s.srv == nil {
 		return
 	}
-	// 停止 cleanupExpiredSessions goroutine
-	select {
-	case <-s.stopCh:
-	default:
-		close(s.stopCh)
-	}
 	_ = s.srv.Shutdown(ctx)
 }
 
@@ -312,8 +299,9 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	// 只返回初始检查通过的可用节点
-	filtered := s.mgr.SnapshotFiltered(true)
+	// 返回全量节点，前端据此按状态统计（健康/拉黑/异常）并展示可解封的拉黑节点。
+	// 之前只返回 SnapshotFiltered(true)，导致 dashboard 的拉黑/异常计数恒为 0，
+	// 且拉黑节点不出现在表格里、无法解封。
 	allNodes := s.mgr.Snapshot()
 	totalNodes := len(allNodes)
 
@@ -332,11 +320,19 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sweepActive, sweepDone, sweepTotal, sweepOK, sweepFail := s.mgr.ProbeSweepProgress()
 	payload := map[string]any{
-		"nodes":          filtered,
+		"nodes":          allNodes,
 		"total_nodes":    totalNodes,
 		"region_stats":   regionStats,
 		"region_healthy": regionHealthy,
+		"probe_sweep": map[string]any{
+			"active":    sweepActive,
+			"done":      sweepDone,
+			"total":     sweepTotal,
+			"available": sweepOK,
+			"failed":    sweepFail,
+		},
 	}
 	writeJSON(w, payload)
 }
@@ -401,7 +397,7 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), singleProbeTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		latency, err := s.mgr.Probe(ctx, tag)
 		if err != nil {
@@ -448,19 +444,6 @@ func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) batchProbeTimeout(total int) time.Duration {
-	concurrency := int(s.maxConcurrentProbes)
-	if concurrency <= 0 {
-		concurrency = int(minConcurrentProbes)
-	}
-	waves := (total + concurrency - 1) / concurrency
-	timeout := time.Duration(waves) * (singleProbeTimeout + batchProbeWaveOverhead)
-	if timeout < minBatchProbeTimeout {
-		timeout = minBatchProbeTimeout
-	}
-	return timeout
-}
-
 // handleProbeAll probes all nodes in batches and returns results via SSE
 func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -479,6 +462,17 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only one batch probe-all may run at a time. A second concurrent request
+	// would multiply total in-flight probes (each request bounds itself, but
+	// not the others), so reject it cleanly instead.
+	if !s.probeAllInFlight.CompareAndSwap(false, true) {
+		busy, _ := json.Marshal(map[string]any{"type": "error", "message": "批量探测已在进行中，请稍候"})
+		fmt.Fprintf(w, "data: %s\n\n", busy)
+		flusher.Flush()
+		return
+	}
+	defer s.probeAllInFlight.Store(false)
+
 	// Get all nodes
 	snapshots := s.mgr.Snapshot()
 	total := len(snapshots)
@@ -489,20 +483,35 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	batchTimeout := s.batchProbeTimeout(total)
-
 	// Send start event
-	startData, _ := json.Marshal(map[string]any{
-		"type":            "start",
-		"total":           total,
-		"timeout_seconds": int(batchTimeout.Seconds()),
-		"concurrency":     s.maxConcurrentProbes,
-	})
+	startData, _ := json.Marshal(map[string]any{"type": "start", "total": total})
 	fmt.Fprintf(w, "data: %s\n\n", startData)
 	flusher.Flush()
 
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(r.Context(), batchTimeout)
+	// Read concurrency from the live config so WebUI changes take effect after
+	// a reload (no process restart required). A fresh semaphore is created per
+	// request to avoid mutating a shared one while probes are in flight.
+	concurrency := s.currentProbeConcurrency()
+	sem := semaphore.NewWeighted(concurrency)
+
+	// Create context with a timeout scaled to node count and concurrency so that
+	// large inventories (e.g. thousands of nodes) are not cut off. Each probe
+	// still has its own 10s deadline; here we bound the total wall time as
+	// ceil(total / concurrency) * perProbe + slack, which is the expected
+	// completion time given the semaphore. We deliberately do NOT cap this below
+	// the estimate: a shorter deadline would cancel still-queued probes and
+	// report reachable nodes as failures (which can then blacklist them). The
+	// client can still abort early by closing the SSE connection (r.Context()).
+	perProbe := 10 * time.Second
+	batches := (int64(total) + concurrency - 1) / concurrency
+	totalTimeout := time.Duration(batches)*perProbe + 30*time.Second
+	if totalTimeout < 2*time.Minute {
+		totalTimeout = 2 * time.Minute
+	}
+	if totalTimeout > 30*time.Minute && s.logger != nil {
+		s.logger.Printf("⚠️  批量探测节点数较多(%d, 并发%d)，预计最长耗时约 %s", total, concurrency, totalTimeout.Round(time.Second))
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), totalTimeout)
 	defer cancel()
 
 	// Probe all nodes with semaphore control
@@ -522,7 +531,7 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 
 			// Acquire semaphore permit
-			if err := s.probeSem.Acquire(ctx, 1); err != nil {
+			if err := sem.Acquire(ctx, 1); err != nil {
 				results <- probeResult{
 					tag:  snap.Tag,
 					name: snap.Name,
@@ -530,10 +539,10 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-			defer s.probeSem.Release(1)
+			defer sem.Release(1)
 
 			// Execute probe
-			probeCtx, probeCancel := context.WithTimeout(ctx, singleProbeTimeout)
+			probeCtx, probeCancel := context.WithTimeout(ctx, 10*time.Second)
 			defer probeCancel()
 
 			latency, err := s.mgr.Probe(probeCtx, snap.Tag)
@@ -719,8 +728,18 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 只导出初始检查通过的可用节点
-	snapshots := s.mgr.SnapshotFiltered(true)
+	// all=true 时导出全部节点（不论死活）；否则只导出初始检查通过的可用节点。
+	includeAll := false
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("all"))) {
+	case "1", "true", "yes":
+		includeAll = true
+	}
+	var snapshots []Snapshot
+	if includeAll {
+		snapshots = s.mgr.Snapshot()
+	} else {
+		snapshots = s.mgr.SnapshotFiltered(true)
+	}
 	var lines []string
 
 	seen := make(map[string]bool)
@@ -850,6 +869,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	} else if scheme == "all" {
 		filename = "proxy_pool_all.txt"
 	}
+	if includeAll {
+		filename = "full_" + filename
+	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 	_, _ = w.Write([]byte(strings.Join(lines, "\n")))
 }
@@ -905,9 +927,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				"failure_threshold":  cfg.Pool.FailureThreshold,
 				"blacklist_duration": cfg.Pool.BlacklistDuration.String(),
 			}
+			resp["sticky"] = map[string]any{
+				"enabled": cfg.Sticky.Enabled,
+				"port":    cfg.Sticky.Port,
+			}
 			resp["management"] = map[string]any{
-				"listen":   cfg.Management.Listen,
-				"password": cfg.Management.Password,
+				"listen":            cfg.Management.Listen,
+				"password":          cfg.Management.Password,
+				"probe_concurrency": cfg.ProbeConcurrencyOrDefault(),
 			}
 			resp["geoip"] = map[string]any{
 				"enabled":              cfg.GeoIP.Enabled,
@@ -942,9 +969,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				FailureThreshold  int    `json:"failure_threshold"`
 				BlacklistDuration string `json:"blacklist_duration"`
 			} `json:"pool,omitempty"`
+			Sticky *struct {
+				Enabled bool   `json:"enabled"`
+				Port    uint16 `json:"port"`
+			} `json:"sticky,omitempty"`
 			Management *struct {
-				Listen   string `json:"listen"`
-				Password string `json:"password"`
+				Listen           string `json:"listen"`
+				Password         string `json:"password"`
+				ProbeConcurrency int    `json:"probe_concurrency"`
 			} `json:"management,omitempty"`
 			Log *struct {
 				Output     string `json:"output"`
@@ -988,7 +1020,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-
 		// Update extended settings
 		s.cfgMu.Lock()
 		if s.cfgSrc != nil {
@@ -1016,9 +1047,16 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			if req.Sticky != nil {
+				s.cfgSrc.Sticky.Enabled = req.Sticky.Enabled
+				s.cfgSrc.Sticky.Port = req.Sticky.Port
+			}
 			if req.Management != nil {
 				s.cfgSrc.Management.Listen = req.Management.Listen
 				s.cfgSrc.Management.Password = req.Management.Password
+				if req.Management.ProbeConcurrency > 0 {
+					s.cfgSrc.Management.ProbeConcurrency = req.Management.ProbeConcurrency
+				}
 			}
 			if req.GeoIP != nil {
 				s.cfgSrc.GeoIP.DatabasePath = req.GeoIP.DatabasePath
@@ -1437,20 +1475,15 @@ func (s *Server) cleanupExpiredSessions() {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-s.stopCh:
-			return
-		case <-ticker.C:
-			now := time.Now()
-			s.sessionMu.Lock()
-			for token, session := range s.sessions {
-				if now.After(session.ExpiresAt) {
-					delete(s.sessions, token)
-				}
+	for range ticker.C {
+		now := time.Now()
+		s.sessionMu.Lock()
+		for token, session := range s.sessions {
+			if now.After(session.ExpiresAt) {
+				delete(s.sessions, token)
 			}
-			s.sessionMu.Unlock()
 		}
+		s.sessionMu.Unlock()
 	}
 }
 

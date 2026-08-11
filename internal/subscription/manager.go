@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -490,66 +489,35 @@ func (m *Manager) MarkNodesModified() {
 
 // fetchAllSubscriptions fetches nodes from all configured subscription URLs.
 func (m *Manager) fetchAllSubscriptions() ([]config.NodeConfig, error) {
-	var allNodes []config.NodeConfig
-	var lastErr error
-
 	timeout := m.baseCfg.SubscriptionRefresh.Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-
-	for _, subURL := range m.baseCfg.Subscriptions {
-		nodes, err := m.fetchSubscription(subURL, timeout)
-		if err != nil {
-			m.logger.Warnf("failed to fetch %s: %v", subURL, err)
-			lastErr = err
-			continue
+	nodes, stats := config.FetchSubscriptionNodes(m.ctx, m.baseCfg.Subscriptions, config.SubscriptionFetchOptions{
+		Timeout:     timeout,
+		Concurrency: m.baseCfg.SubscriptionRefresh.FetchConcurrency,
+		Client:      m.httpClient,
+		Loggerf: func(format string, args ...any) {
+			m.logger.Infof(format, args...)
+		},
+	})
+	if stats.DedupedURLs > 0 || stats.DedupedNodes > 0 {
+		m.logger.Infof("subscription dedupe summary: urls=%d, nodes=%d", stats.DedupedURLs, stats.DedupedNodes)
+	}
+	if cachedNodes, err := config.LoadNodesFromFile(m.getNodesFilePath()); err == nil && len(cachedNodes) > 0 {
+		if len(nodes) == 0 {
+			m.logger.Warnf("using %d cached subscription nodes because refresh returned no usable nodes", len(cachedNodes))
+			return cachedNodes, nil
 		}
-		m.logger.Infof("fetched %d nodes from subscription", len(nodes))
-		allNodes = append(allNodes, nodes...)
+		if stats.Failed > 0 && len(nodes) < len(cachedNodes) {
+			m.logger.Warnf("keeping %d cached subscription nodes because partial refresh only returned %d nodes", len(cachedNodes), len(nodes))
+			return cachedNodes, nil
+		}
 	}
-
-	if len(allNodes) == 0 && lastErr != nil {
-		return nil, lastErr
+	if len(nodes) == 0 && stats.LastError != nil {
+		return nil, stats.LastError
 	}
-
-	return allNodes, nil
-}
-
-// fetchSubscription fetches and parses a single subscription URL.
-func (m *Manager) fetchSubscription(subURL string, timeout time.Duration) ([]config.NodeConfig, error) {
-	ctx, cancel := context.WithTimeout(m.ctx, timeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", subURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("User-Agent", "clash-verge/v2.2.3")
-	req.Header.Set("Accept", "*/*")
-
-	// Use custom HTTP client with connection pooling
-	resp, err := m.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-
-	// Limit read size to prevent memory exhaustion
-	const maxBodySize = 10 * 1024 * 1024 // 10MB
-	limitedReader := io.LimitReader(resp.Body, maxBodySize)
-
-	body, err := io.ReadAll(limitedReader)
-	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
-	}
-
-	return config.ParseSubscriptionContent(string(body))
+	return nodes, nil
 }
 
 // createNewConfig creates a new config with updated nodes while preserving other settings.
@@ -557,31 +525,42 @@ func (m *Manager) createNewConfig(nodes []config.NodeConfig) *config.Config {
 	// Deep copy base config
 	newCfg := *m.baseCfg
 
-	// Assign port numbers to nodes in multi-port mode
-	if newCfg.Mode == "multi-port" {
-		portCursor := newCfg.MultiPort.BasePort
-		for i := range nodes {
-			nodes[i].Port = portCursor
-			portCursor++
-			// Apply default credentials
-			if nodes[i].Username == "" {
-				nodes[i].Username = newCfg.MultiPort.Username
-				nodes[i].Password = newCfg.MultiPort.Password
-			}
+	// Mark all subscription nodes with proper source
+	for i := range nodes {
+		nodes[i].Source = config.NodeSourceSubscription
+	}
+
+	// Preserve inline nodes from base config (nodes defined directly in config.yaml)
+	var inlineNodes []config.NodeConfig
+	for _, node := range m.baseCfg.Nodes {
+		if node.Source == config.NodeSourceInline {
+			inlineNodes = append(inlineNodes, node)
 		}
 	}
 
+	// Merge inline nodes with subscription nodes: inline nodes first, then subscription nodes
+	mergedNodes := make([]config.NodeConfig, 0, len(inlineNodes)+len(nodes))
+	mergedNodes = append(mergedNodes, inlineNodes...)
+	mergedNodes = append(mergedNodes, nodes...)
+
+	// Port and credential assignment is owned by NormalizeWithPortMap (invoked
+	// via ReloadWithPortMap): it preserves the port of any node whose stable
+	// identity is unchanged and assigns fresh, collision-free ports to the rest.
+	// Pre-assigning sequential ports here would override that preservation and
+	// could collide with a preserved port, so it is intentionally left to the
+	// normalize step.
+
 	// Process node names
-	for i := range nodes {
-		nodes[i].Name = strings.TrimSpace(nodes[i].Name)
-		nodes[i].URI = strings.TrimSpace(nodes[i].URI)
+	for i := range mergedNodes {
+		mergedNodes[i].Name = strings.TrimSpace(mergedNodes[i].Name)
+		mergedNodes[i].URI = strings.TrimSpace(mergedNodes[i].URI)
 
 		// Auto-extract name from URI if not provided
-		if nodes[i].Name == "" {
-			nodes[i].Name = config.ExtractNodeName(nodes[i].URI)
+		if mergedNodes[i].Name == "" {
+			mergedNodes[i].Name = config.ExtractNodeName(mergedNodes[i].URI)
 		}
-		if nodes[i].Name == "" {
-			nodes[i].Name = fmt.Sprintf("node-%d", i)
+		if mergedNodes[i].Name == "" {
+			mergedNodes[i].Name = fmt.Sprintf("node-%d", i)
 		}
 	}
 
@@ -595,11 +574,11 @@ func (m *Manager) createNewConfig(nodes []config.NodeConfig) *config.Config {
 		for idx := range extraNodes {
 			extraNodes[idx].Source = config.NodeSourceExtraFile
 		}
-		nodes = append(nodes, extraNodes...)
+		mergedNodes = append(mergedNodes, extraNodes...)
 		m.logger.Infof("loaded %d extra nodes from %s", len(extraNodes), extraFile)
 	}
 
-	newCfg.Nodes = nodes
+	newCfg.Nodes = mergedNodes
 	return &newCfg
 }
 

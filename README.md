@@ -9,9 +9,12 @@
 - **Three runtime modes**: `pool` (single-port load balancing), `multi-port` (one port per node), and `hybrid` (both simultaneously)
 - **Wide protocol support**: VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS5, HTTP/HTTPS
 - **Automatic health checking** with configurable failure thresholds and blacklist duration, plus manual blacklist/release from the dashboard
+- **Automatic fail-over retry**: when a node's dial fails, the request is retried on another healthy node (configurable attempts)
 - **GeoIP region routing**: classify nodes by country and route traffic through a specific region via a dedicated HTTP proxy endpoint
+- **Sticky sessions**: optional dedicated port that pins each client (by source IP) to a fixed upstream node for a stable egress IP, coexisting with the rotating pool entry
 - **Multiple node sources**: inline config, `nodes.txt` file, or subscription URLs (Base64, plain text, Clash YAML)
 - **Subscription auto-refresh with hot-reload**: periodically fetches subscription updates and reloads without restart
+- **Stable per-node ports**: in `multi-port`/`hybrid` mode each node keeps the same local port across subscription refreshes and restarts (persisted to `node_ports.json`)
 - **WebUI dashboard**: real-time node status, traffic charts, diagnostics, log console, and full settings management
 - **Management API**: RESTful endpoints for node CRUD, probing, blacklisting, subscription management, and config reload
 - **Configurable DNS resolver** with fallback servers and IPv4/IPv6 strategy control
@@ -29,13 +32,23 @@ touch nodes.txt
 
 Edit `config.yaml` and add your proxy nodes (inline nodes, `nodes.txt` file, or subscription URLs).
 
-> **Important**: `config.yaml` and `nodes.txt` MUST exist as files before starting the Docker container. If they don't exist, Docker will create them as directories, causing startup failure. Use `start.sh` to avoid this issue.
+> Why `touch nodes.txt`? If you bind-mount a host *file* path that doesn't exist yet (e.g. `-v ./data/nodes.txt:/etc/easy_proxies/nodes.txt`), Docker creates a **directory** named `nodes.txt` on the host and mounts that. The container then sees a directory where it expects a file and fails opaquely. Pre-creating the file (or mapping the **directory** `./data:/etc/easy_proxies`, which auto-generates files) avoids this. If you hit it, run `rm -rf ./data/nodes.txt && touch ./data/nodes.txt` and restart.
 
 ### 2. Run with Docker (Recommended)
 
+Zero-config: config files are auto-generated on first run.
+
 ```bash
-./start.sh
-# or manually:
+mkdir -p data logs
+docker run --user $(id -u):$(id -g) \
+  -v $(pwd)/data:/etc/easy_proxies \
+  -v $(pwd)/logs:/app/logs \
+  --network host \
+  ghcr.io/jasonwong1991/easy_proxies:latest
+```
+
+Or use docker compose:
+```bash
 docker compose up -d
 ```
 
@@ -66,6 +79,7 @@ Open `http://localhost:9091` in your browser.
 | `sequential` | Round-robin through healthy nodes |
 | `random` | Random node selection |
 | `balance` | Least-connections balancing |
+| `latency` | Pick the node with the lowest measured latency |
 
 ### Minimal Config Example
 
@@ -79,9 +93,11 @@ listener:
   password: pass
 
 pool:
-  mode: sequential    # sequential / random / balance
+  mode: sequential    # sequential / random / balance / latency
   failure_threshold: 3
   blacklist_duration: 24h
+  retry_enabled: true # retry on another node when a dial fails
+  retry_attempts: 3   # max total dial attempts per request
 
 management:
   enabled: true
@@ -95,6 +111,16 @@ dns:
   strategy: prefer_ipv4
 
 nodes_file: nodes.txt
+```
+
+### Sticky Proxy (optional, pool/hybrid mode)
+
+When enabled, a dedicated extra port is opened (default `listener.port + 1`, i.e. `2324`) that coexists with the regular `2323` entry. Clients connecting through the sticky port are pinned to a single upstream node by **source IP**, keeping the egress IP stable instead of rotating on every connection. The pin is permanent until the pinned node is blacklisted/removed. Listen address and credentials are inherited from `listener`.
+
+```yaml
+sticky:
+  enabled: true
+  port: 2324    # defaults to listener.port + 1 when omitted
 ```
 
 ### Full Config Reference
@@ -241,11 +267,11 @@ resp, err := client.Get("http://example.com")
 | VLESS | `vless://` | TCP, WS, HTTP/2, gRPC, HTTPUpgrade; TLS/Reality/uTLS |
 | VMess | `vmess://` | WS, HTTP/2, gRPC, HTTPUpgrade; TLS/uTLS |
 | Trojan | `trojan://` | WS, HTTP/2, gRPC, HTTPUpgrade; TLS/Reality/uTLS |
-| Shadowsocks | `ss://` | Direct; SIP002 format |
+| Shadowsocks | `ss://`, `shadowsocks://` | Direct; SIP002 and legacy whole-payload Base64 formats |
 | Hysteria2 | `hysteria2://`, `hy2://` | QUIC-based |
 | TUIC | `tuic://` | QUIC-based |
 | AnyTLS | `anytls://` | TLS |
-| SOCKS5 | `socks5://`, `socks://` | Direct |
+| SOCKS5 | `socks5://`, `socks5h://`, `socks://` | Direct |
 | HTTP | `http://`, `https://` | Direct |
 
 ## Node Sources
@@ -255,6 +281,7 @@ resp, err := client.Get("http://example.com")
 ```yaml
 nodes:
   - uri: "vless://uuid@server:443?security=tls&type=ws&path=/path#Name"
+  - uri: "ss://base64(method:password@server:port)#Name"
 ```
 
 ### Nodes File
@@ -274,9 +301,19 @@ subscriptions:
 subscription_refresh:
   enabled: true
   interval: 1h
+  timeout: 30s
+  fetch_concurrency: 16
 ```
 
 Supports Base64, plain text, and Clash YAML formats. When subscriptions are configured, fetched nodes are written to `nodes_file`. Subscription changes trigger automatic hot-reload without restart.
+
+**Multi-source Node Merging**: When both `nodes` and `subscriptions` are configured:
+- Inline nodes (defined in `nodes` array) and subscription nodes are merged together
+- Subscription updates preserve inline nodes instead of overwriting them
+- Node order: inline nodes first, followed by subscription nodes
+- Each node's source (inline/subscription) is tracked and displayed in the management UI
+
+**Stable Ports** (`multi-port`/`hybrid`): each node is identified by a stable key derived from its URI (ignoring the display name and parameter order), so a node keeps the same local port even when the subscription renames or reorders it. Assignments are saved to `node_ports.json` next to `config.yaml` and restored on restart.
 
 ## WebUI Dashboard
 
@@ -314,7 +351,7 @@ When `management.password` is empty, authentication is bypassed.
 
 ### docker-compose.yml
 
-The default setup uses host networking (recommended for automatic port management). Volumes mount `config.yaml` and `nodes.txt`:
+The default setup uses host networking (recommended for automatic port management). Config directory is auto-generated on first run:
 
 ```yaml
 services:
@@ -323,16 +360,16 @@ services:
     container_name: easy_proxies
     restart: unless-stopped
     network_mode: host
+    user: "${UID:-10001}:${GID:-10001}"
     volumes:
-      - ./config.yaml:/etc/easy_proxies/config.yaml
-      - ./nodes.txt:/etc/easy_proxies/nodes.txt
+      - ./data:/etc/easy_proxies
       - ./logs:/app/logs
 ```
 
 ### Important Notes
 
-- **Create config files first**: `config.yaml` and `nodes.txt` must exist as files before running `docker compose up`. Use `./start.sh` which handles this automatically.
-- **Permissions**: Files need write permission for WebUI settings to persist (`chmod 666 config.yaml nodes.txt`).
+- **Zero-config**: When mapping a directory, `config.yaml` and `nodes.txt` are auto-generated on first run.
+- **Permissions**: Use `--user $(id -u):$(id -g)` to match your host user for file access.
 - **Multi-platform**: Supports amd64 and arm64 architectures.
 - **Reload**: `/api/reload` and subscription refresh will interrupt active connections.
 
@@ -342,8 +379,108 @@ services:
 |------|-------|
 | 2323 | Pool proxy entry (pool/hybrid mode) |
 | 9091 | WebUI and Management API |
+| 9092 | Internal Clash API (localhost only, traffic stats) |
 | 1221 | GeoIP region router (when enabled, configurable) |
 | 24000+ | Multi-port mode (one per node) |
+
+In `multi-port`/`hybrid` mode, per-node ports are persisted to `node_ports.json` (next to `config.yaml`) and restored on restart, so each node keeps a stable port across restarts and subscription refreshes. Delete this file to force a clean reassignment.
+
+## Troubleshooting
+
+### Configuration Persistence Issues
+
+**Problem**: Configuration changes made via WebUI are lost after container restart or rebuild.
+
+**Quick Diagnosis**:
+```bash
+# Check your data directory layout and permissions
+ls -la data/
+[ -f data/config.yaml ]  || echo "missing data/config.yaml"
+[ -d data/config.yaml ]   && echo "BUG: data/config.yaml is a directory (see Quick Start note)"
+[ -d data/nodes.txt ]    && echo "BUG: data/nodes.txt is a directory (see Quick Start note)"
+```
+
+**Common Causes and Solutions**:
+
+1. **File Permission Issues**:
+   ```bash
+   # Fix permissions
+   chown -R $(id -u):$(id -g) data
+   chmod 755 data
+   chmod 644 data/config.yaml data/nodes.txt
+   ```
+
+2. **Incorrect Volume Mapping**:
+   - Ensure `docker-compose.yml` uses `./data:/etc/easy_proxies`
+   - Do not use absolute paths or incorrect directories
+
+3. **Missing UID/GID on Startup**:
+   ```bash
+   # Correct startup command
+   UID=$(id -u) GID=$(id -g) docker-compose up -d
+   ```
+
+**Verify Configuration Persistence**:
+```bash
+# Check file modification times
+ls -lh data/config.yaml data/nodes.txt
+
+# Check container logs for save confirmations
+docker-compose logs -f | grep "Saved"
+```
+
+**Detailed Troubleshooting**: See [docs/troubleshooting-persistence.md](docs/troubleshooting-persistence.md)
+
+### Docker Permission Issues
+
+**Problem**: When using `docker-compose.yml` with volume mapping, you may encounter permission errors like "permission denied" or "cannot write to /etc/easy_proxies".
+
+**Root Cause**: The container runs as a non-root user (specified by `user: "${UID:-10001}:${GID:-10001}"` in docker-compose.yml), but the mounted host directory may have different ownership.
+
+**Solutions**:
+
+1. **Use docker compose with a directory mount (Recommended)**:
+   ```bash
+   mkdir -p data logs
+   sudo chown -R $(id -u):$(id -g) data logs
+   docker compose up -d
+   ```
+   This maps the whole `./data` directory; `config.yaml` and `nodes.txt` are auto-generated as files on first run.
+
+2. **Pre-create config files** (alternative, for file-level mounts):
+   ```bash
+   mkdir -p data
+   cp config.example.yaml data/config.yaml
+   touch data/nodes.txt
+   chown -R $(id -u):$(id -g) data
+   docker compose up -d
+   ```
+
+**For docker run command**:
+```bash
+mkdir -p data logs
+chmod -R u+w data logs
+docker run --user $(id -u):$(id -g) \
+  -v $(pwd)/data:/etc/easy_proxies \
+  -v $(pwd)/logs:/app/logs \
+  --network host \
+  ghcr.io/jasonwong1991/easy_proxies:latest
+```
+
+### Other Common Issues
+
+- **"Config file not found"**: Ensure `config.yaml` exists in the mounted directory
+- **"Cannot bind port"**: Check if the port is already in use by another service
+- **"All nodes failed health check"**: Verify your proxy URIs are correct and the upstream servers are reachable
+- **"Proxy was working but suddenly stopped"**: Check if the node is blacklisted (appears after 3 consecutive failures, default duration: 24h)
+  - **Solution 1**: Release via WebUI - click the "Release" button next to the node
+  - **Solution 2**: Release via API - `POST http://localhost:9091/api/nodes/{tag}/release`
+  - **Solution 3**: Reduce blacklist duration in `config.yaml`:
+    ```yaml
+    pool:
+      blacklist_duration: 1h  # Change from default 24h to 1h
+    ```
+  - Check logs for blacklist events: `docker compose logs | grep "BLACKLISTED"`
 
 ## Changelog
 
@@ -358,6 +495,10 @@ go test ./...
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=jasonwong1991/easy_proxies&type=Date)](https://star-history.com/#jasonwong1991/easy_proxies&Date)
+
+## Acknowledgements
+
+This project is built on top of [sing-box](https://github.com/SagerNet/sing-box) — a universal proxy platform that powers all the underlying protocol implementations and transports. Huge thanks to the SagerNet team and contributors for their outstanding work.
 
 ## License
 

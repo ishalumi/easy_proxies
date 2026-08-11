@@ -1,67 +1,76 @@
 #!/bin/sh
-# Fix bind-mount directory issue and ownership, then start easy_proxies
+# Prepare /etc/easy_proxies (auto-generate missing files, guard against
+# Docker bind-mount foot-guns), then exec easy_proxies.
 
-OVERRIDE_CONFIG=false
-CONFIG_PATH="/etc/easy_proxies/config.yaml"
+CONFIG_DIR="/etc/easy_proxies"
+CONFIG_FILE="$CONFIG_DIR/config.yaml"
+NODES_FILE="$CONFIG_DIR/nodes.txt"
+EXAMPLE_CONFIG="/app/config.example.yaml"
 
-# Check if config.yaml was bind-mounted as a directory (Docker creates directories
-# for non-existent bind-mount sources)
-if [ -d "/etc/easy_proxies/config.yaml" ]; then
-  echo "=======================================================" >&2
-  echo "WARNING: config.yaml is a directory, not a file!" >&2
-  echo "This happens when Docker creates the bind-mount target" >&2
-  echo "before the file exists on the host." >&2
-  echo "" >&2
-  echo "To fix permanently, run on the host:" >&2
-  echo "  docker compose down && rm -rf config.yaml && touch config.yaml && docker compose up -d" >&2
-  echo "Or use start.sh which handles this automatically." >&2
-  echo "=======================================================" >&2
+# When a host bind-mount targets a single file that does not exist yet
+# (e.g. -v ./data/nodes.txt:/etc/easy_proxies/nodes.txt), Docker creates a
+# HOST DIRECTORY at that path and mounts it. The container then sees a
+# directory where a file is expected and the app fails opaquely. Detect
+# this and exit with a concrete fix instead of a confusing runtime crash.
+die() {
+    echo "[easy_proxies] ERROR: $1" >&2
+    echo "$2" >&2
+    exit 1
+}
 
-  CONFIG_PATH="/tmp/default_config.yaml"
-  cat > "$CONFIG_PATH" <<'YAML'
-mode: pool
+fix_perm_hint="Ensure the mounted directory is writable by the container user:
+    mkdir -p data && chown -R $(id -u):$(id -g) data"
 
-listener:
-  address: 0.0.0.0
-  port: 2323
+# --- config.yaml: reject directory, generate if absent ---
+if [ -d "$CONFIG_FILE" ]; then
+    die "$CONFIG_FILE is a directory, not a file." \
+"This happens when you bind-mount a host file that does not exist yet; Docker
+creates a directory instead. Fix depends on your mount configuration:
 
-pool:
-  mode: balance
+  Directory mount (-v ./data:/etc/easy_proxies):
+    rm -rf ./data/config.yaml
+    cp config.example.yaml ./data/config.yaml
+    docker compose up -d
 
-management:
-  enabled: true
-  listen: 0.0.0.0:9091
-  password: ""
-
-dns:
-  server: 223.5.5.5
-  port: 53
-  strategy: prefer_ipv4
-YAML
-  OVERRIDE_CONFIG=true
-  echo "INFO: Using fallback config at $CONFIG_PATH" >&2
+  File mount (-v ./config.yaml:/etc/easy_proxies/config.yaml):
+    rm -rf ./config.yaml
+    cp config.example.yaml ./config.yaml
+    docker compose up -d"
+fi
+if [ ! -e "$CONFIG_FILE" ]; then
+    [ -w "$CONFIG_DIR" ] || die "Cannot create $CONFIG_FILE ($CONFIG_DIR not writable)." "$fix_perm_hint"
+    cp "$EXAMPLE_CONFIG" "$CONFIG_FILE"
+    echo "[easy_proxies] Generated default config from $EXAMPLE_CONFIG"
 fi
 
-# Check if nodes.txt was bind-mounted as a directory
-if [ -d "/etc/easy_proxies/nodes.txt" ]; then
-  echo "=======================================================" >&2
-  echo "WARNING: nodes.txt is a directory, not a file!" >&2
-  echo "This happens when Docker creates the bind-mount target" >&2
-  echo "before the file exists on the host." >&2
-  echo "" >&2
-  echo "To fix permanently, run on the host:" >&2
-  echo "  docker compose down && rm -rf nodes.txt && touch nodes.txt && docker compose up -d" >&2
-  echo "Or use start.sh which handles this automatically." >&2
-  echo "=======================================================" >&2
+# --- nodes.txt: reject directory, create empty file if absent ---
+if [ -d "$NODES_FILE" ]; then
+    die "$NODES_FILE is a directory, not a file." \
+"This happens when you bind-mount a host file that does not exist yet; Docker
+creates a directory instead. Fix depends on your mount configuration:
+
+  Directory mount (-v ./data:/etc/easy_proxies):
+    rm -rf ./data/nodes.txt
+    touch ./data/nodes.txt
+    docker compose up -d
+
+  File mount (-v ./nodes.txt:/etc/easy_proxies/nodes.txt):
+    rm -rf ./nodes.txt
+    touch ./nodes.txt
+    docker compose up -d"
+fi
+if [ ! -e "$NODES_FILE" ]; then
+    [ -w "$CONFIG_DIR" ] || die "Cannot create $NODES_FILE ($CONFIG_DIR not writable)." "$fix_perm_hint"
+    touch "$NODES_FILE"
+    echo "[easy_proxies] Created empty nodes.txt"
 fi
 
-# Fix ownership of mounted config directory so the non-root user can write
-chown -R easy:easy /etc/easy_proxies 2>/dev/null || true
-chown -R easy:easy /app 2>/dev/null || true
-
-if [ "$OVERRIDE_CONFIG" = "true" ]; then
-  chown easy:easy "$CONFIG_PATH" 2>/dev/null || true
-  exec gosu easy /usr/local/bin/easy_proxies --config "$CONFIG_PATH"
-else
-  exec gosu easy /usr/local/bin/easy_proxies "$@"
+# --- final readability check ---
+if [ ! -r "$CONFIG_FILE" ]; then
+    die "Cannot read $CONFIG_FILE (permission denied)." \
+"Fix on the host:
+    chown -R $(id -u):$(id -g) data
+    chmod 644 data/config.yaml data/nodes.txt"
 fi
+
+exec /usr/local/bin/easy_proxies "$@"

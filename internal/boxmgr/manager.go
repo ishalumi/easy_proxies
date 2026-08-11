@@ -31,7 +31,11 @@ const (
 	defaultHealthCheckTimeout = 30 * time.Second
 	healthCheckPollInterval   = 500 * time.Millisecond
 	periodicHealthInterval    = 5 * time.Minute
-	periodicHealthTimeout     = 10 * time.Second
+	// periodicHealthTimeout bounds each individual probe. Unreachable nodes wait
+	// out this full deadline, so at scale (thousands of nodes) it dominates the
+	// total sweep time; 8s comfortably covers a healthy node's dial+TLS+HTTP
+	// while letting dead nodes be abandoned sooner.
+	periodicHealthTimeout = 8 * time.Second
 )
 
 // Logger defines logging interface for the manager.
@@ -215,17 +219,27 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 	// Reset shared state store to ensure clean state for new config
 	pool.ResetSharedStateStore()
 	// 清空 monitor 旧节点，释放对旧 outbound 的引用
-	if m.monitorMgr != nil {
-		m.monitorMgr.Reset()
-	}
+	// (upstream Manager 用 ClearNodes 实现，无独立 Reset 方法)
 
 	// Clear stale monitor nodes so the dashboard reflects the new config
 	if m.monitorMgr != nil {
 		m.monitorMgr.ClearNodes()
 	}
 
-	// Create and start new box instance with automatic port conflict resolution
+	// Create and start new box instance.
+	//
+	// A bind conflict on start is almost always transient: the old box's
+	// listeners (the hybrid listener on 2323 and every per-node port on 24000+)
+	// were just closed and the OS has not yet released them. The fixed sleep
+	// above is a best-effort head start, not a guarantee. So on "address already
+	// in use" we WAIT and retry the SAME ports, keeping every preserved port
+	// stable across the refresh. Reassigning a node to a fresh port is a
+	// last-resort escape hatch (only once we've waited through several attempts):
+	// moving a port silently breaks clients pointed at the old one and is exactly
+	// the failure this guards against.
 	var instance *box.Box
+	started := false
+	var lastStartErr error
 	maxRetries := 10
 	for retry := 0; retry < maxRetries; retry++ {
 		var err error
@@ -234,20 +248,44 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 			m.rollbackToOldConfig(ctx, oldCfg)
 			return fmt.Errorf("create new box: %w", err)
 		}
-		if err = instance.Start(); err != nil {
-			_ = instance.Close()
-			// Check if it's a port conflict error
-			if conflictPort := extractPortFromBindError(err); conflictPort > 0 {
-				m.logger.Warnf("port %d is in use, reassigning and retrying...", conflictPort)
-				if reassigned := reassignConflictingPort(newCfg, conflictPort); reassigned {
-					pool.ResetSharedStateStore()
-					continue
-				}
-			}
+		if err = instance.Start(); err == nil {
+			started = true
+			break // Success
+		}
+		_ = instance.Close()
+		lastStartErr = err
+
+		conflictPort := extractPortFromBindError(err)
+		if conflictPort == 0 {
+			// Not a port conflict: unrecoverable by retrying. Roll back now.
 			m.rollbackToOldConfig(ctx, oldCfg)
 			return fmt.Errorf("start new box: %w", err)
 		}
-		break // Success
+
+		// Give the OS more time to release the just-closed listener, then retry
+		// the same port assignment.
+		m.logger.Warnf("port %d still in use on start attempt %d/%d, waiting for release and retrying...", conflictPort, retry+1, maxRetries)
+		time.Sleep(300 * time.Millisecond)
+
+		// Only after we've waited through the first half of our attempts do we
+		// treat the conflict as persistent (some other process owns the port)
+		// and reassign the offending node. The listener port cannot be
+		// reassigned this way; if it is the conflict we simply keep waiting.
+		if retry >= maxRetries/2 {
+			if reassignConflictingPort(newCfg, conflictPort) {
+				m.logger.Warnf("port %d persistently in use; reassigned the affected node to a fresh port", conflictPort)
+				pool.ResetSharedStateStore()
+			}
+		}
+	}
+
+	if !started {
+		// Never commit a closed / non-running instance as the current box: doing
+		// so silently kills every port (2323 and all 24000+) with no error. Fall
+		// back to the previous configuration instead.
+		m.logger.Errorf("new box failed to start after %d attempts: %v", maxRetries, lastStartErr)
+		m.rollbackToOldConfig(ctx, oldCfg)
+		return fmt.Errorf("start new box: exhausted %d attempts: %w", maxRetries, lastStartErr)
 	}
 
 	m.applyConfigSettings(newCfg)
@@ -290,14 +328,29 @@ func (m *Manager) rollbackToOldConfig(ctx context.Context, oldCfg *config.Config
 		return
 	}
 	m.logger.Warnf("attempting rollback to previous config...")
-	instance, err := m.createBox(ctx, oldCfg)
-	if err != nil {
-		m.logger.Errorf("rollback failed to create box: %v", err)
-		return
-	}
-	if err := instance.Start(); err != nil {
+
+	// The rollback binds the same ports the failed start attempted, which may
+	// still be draining. Retry with backoff so a transient bind conflict does
+	// not leave the manager with no running box at all.
+	var instance *box.Box
+	const rollbackAttempts = 5
+	for attempt := 0; attempt < rollbackAttempts; attempt++ {
+		var err error
+		instance, err = m.createBox(ctx, oldCfg)
+		if err != nil {
+			m.logger.Errorf("rollback failed to create box: %v", err)
+			return
+		}
+		if err = instance.Start(); err == nil {
+			break
+		}
 		_ = instance.Close()
-		m.logger.Errorf("rollback failed to start box: %v", err)
+		instance = nil
+		m.logger.Warnf("rollback start attempt %d/%d failed: %v", attempt+1, rollbackAttempts, err)
+		time.Sleep(300 * time.Millisecond)
+	}
+	if instance == nil {
+		m.logger.Errorf("rollback failed to start box after %d attempts", rollbackAttempts)
 		return
 	}
 	m.mu.Lock()
@@ -412,6 +465,21 @@ func (m *Manager) startGeoIPRouter(ctx context.Context, cfg *config.Config) {
 	m.mu.Unlock()
 }
 
+// newBoxRecover wraps box.New and converts panics into errors. Some malformed
+// subscription nodes make the sing-box library panic during outbound
+// initialization (e.g. stringifying an unexpected *string while formatting its
+// own error) instead of returning an error. Without this guard such a node
+// crashes the whole process and the service never starts.
+func newBoxRecover(opts box.Options) (instance *box.Box, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			instance = nil
+			err = fmt.Errorf("sing-box panicked during initialization: %v", r)
+		}
+	}()
+	return box.New(opts)
+}
+
 // createBox builds a sing-box instance from config.
 // It retries automatically when individual outbounds fail sing-box validation,
 // removing the offending outbound each time.
@@ -442,7 +510,7 @@ func (m *Manager) createBox(ctx context.Context, cfg *config.Config) (*box.Box, 
 		boxCtx := box.Context(ctx, inboundRegistry, outboundRegistry, endpointRegistry, dnsRegistry, serviceRegistry)
 		boxCtx = monitor.ContextWith(boxCtx, m.monitorMgr)
 
-		instance, err := box.New(box.Options{Context: boxCtx, Options: opts})
+		instance, err := newBoxRecover(box.Options{Context: boxCtx, Options: opts})
 		if err == nil {
 			if attempt > 0 {
 				log.Printf("✅ sing-box instance created after removing %d invalid outbound(s)", attempt)
@@ -726,15 +794,12 @@ func (m *Manager) CreateNode(ctx context.Context, node config.NodeConfig) (confi
 		return config.NodeConfig{}, err
 	}
 
-	// Determine source: if subscriptions exist, new nodes go to nodes.txt (subscription source)
-	// Otherwise, if nodes_file exists, use file source; else inline
-	if len(m.cfg.Subscriptions) > 0 {
-		normalized.Source = config.NodeSourceSubscription
-	} else if m.cfg.NodesFile != "" {
-		normalized.Source = config.NodeSourceFile
-	} else {
-		normalized.Source = config.NodeSourceInline
-	}
+	// A node added through the WebUI is an explicit user configuration, so it is
+	// always persisted as an inline node in config.yaml — regardless of whether
+	// subscriptions are configured. Classifying it as a subscription/file source
+	// would route it to nodes.txt, which the next subscription refresh overwrites
+	// (createNewConfig preserves only inline nodes), silently losing the node.
+	normalized.Source = config.NodeSourceInline
 
 	m.cfg.Nodes = append(m.cfg.Nodes, normalized)
 	if err := m.cfg.Save(); err != nil {
@@ -837,14 +902,25 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 		return errors.New("new config is nil")
 	}
 
-	// Apply port mapping to preserve existing node ports
-	if portMap != nil && len(portMap) > 0 {
-		if err := newCfg.NormalizeWithPortMap(portMap); err != nil {
-			return fmt.Errorf("normalize config with port map: %w", err)
-		}
+	// Apply port mapping and assign ports. NormalizeWithPortMap preserves the
+	// port of any node present in portMap and assigns fresh, collision-free
+	// ports to the rest. It is always run (an empty map simply means "assign
+	// all ports fresh"), since createNewConfig no longer pre-assigns them.
+	if err := newCfg.NormalizeWithPortMap(portMap); err != nil {
+		return fmt.Errorf("normalize config with port map: %w", err)
 	}
 
-	return m.Reload(newCfg)
+	if err := m.Reload(newCfg); err != nil {
+		return err
+	}
+
+	// Persist the (possibly updated) assignments so a restart keeps the same
+	// port per node. Best-effort: a write failure does not affect the running
+	// proxy, only the next restart's ability to restore ports.
+	if err := newCfg.SaveNodePortMap(); err != nil {
+		m.logger.Warnf("failed to persist node ports: %v", err)
+	}
+	return nil
 }
 
 // CurrentPortMap returns the current port mapping from the active configuration.

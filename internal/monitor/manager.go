@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,24 +17,15 @@ import (
 
 // Config mirrors user settings needed by the monitoring server.
 type Config struct {
-	Enabled        bool
-	Listen         string
-	ProbeTarget    string
-	Password       string
-	ProxyUsername  string // 代理池的用户名（用于导出）
-	ProxyPassword  string // 代理池的密码（用于导出）
-	ExternalIP     string // 外部 IP 地址，用于导出时替换 0.0.0.0
-	SkipCertVerify bool   // 全局跳过 SSL 证书验证
-}
-
-// ProbeRequest is the normalized health-check request derived from probe_target.
-type ProbeRequest struct {
-	Destination    M.Socksaddr
-	Scheme         string
-	HostHeader     string
-	ServerName     string
-	Path           string
-	SkipCertVerify bool
+	Enabled          bool
+	Listen           string
+	ProbeTarget      string
+	Password         string
+	ProxyUsername    string // 代理池的用户名（用于导出）
+	ProxyPassword    string // 代理池的密码（用于导出）
+	ExternalIP       string // 外部 IP 地址，用于导出时替换 0.0.0.0
+	SkipCertVerify   bool   // 全局跳过 SSL 证书验证
+	ProbeConcurrency int    // 并发探测线程数（批量探测与周期健康检查共用）
 }
 
 // NodeInfo is static metadata about a proxy entry.
@@ -108,14 +97,47 @@ type entry struct {
 
 // Manager aggregates all node states for the UI/API.
 type Manager struct {
-	cfg        Config
-	probeReq   ProbeRequest
-	probeReady bool
-	mu         sync.RWMutex
-	nodes      map[string]*entry
-	ctx        context.Context
-	cancel     context.CancelFunc
-	logger     Logger
+	cfg              Config
+	probeDst         M.Socksaddr
+	probeHost        string // probe target hostname (TLS SNI when probeTLS is true)
+	probeTLS         bool   // strict mode: probe via TLS with certificate verification
+	probeReady       bool
+	probeConcurrency int
+	mu               sync.RWMutex
+	nodes            map[string]*entry
+	ctx              context.Context
+	cancel           context.CancelFunc
+	logger           Logger
+
+	// Sweep progress for the WebUI. probeSweepActive is 1 while probeAllNodes
+	// runs; the counters let the dashboard show a live "初始化探测中 3200/8363".
+	probeSweepActive atomic.Int32
+	probeSweepTotal  atomic.Int32
+	probeSweepDone   atomic.Int32
+	probeSweepOK     atomic.Int32
+	probeSweepFail   atomic.Int32
+
+	// probeGate serializes health-check sweeps. probeAllNodes is triggered from
+	// several places concurrently (boot, the 5-minute ticker, and post-reload
+	// ProbeAllNow); without this gate two sweeps overlap, corrupt the shared
+	// progress counters, and — because each one clears probeSweepActive on
+	// return — leave the flag flapping so the dashboard progress bar reappears
+	// forever. The gate enforces single-flight and coalesces any trigger that
+	// arrives mid-sweep into exactly one follow-up pass (so a reload's newly
+	// registered nodes still get probed).
+	probeGate      sync.Mutex
+	sweepRunning   bool
+	rerunRequested bool
+}
+
+// ProbeSweepProgress reports the current health-check sweep progress. active is
+// true only while a sweep is running.
+func (m *Manager) ProbeSweepProgress() (active bool, done, total, ok, failed int) {
+	return m.probeSweepActive.Load() == 1,
+		int(m.probeSweepDone.Load()),
+		int(m.probeSweepTotal.Load()),
+		int(m.probeSweepOK.Load()),
+		int(m.probeSweepFail.Load())
 }
 
 // Logger interface for logging
@@ -124,107 +146,70 @@ type Logger interface {
 	Warn(args ...any)
 }
 
+// clampProbeConcurrency is the single source of truth for the periodic probe
+// worker count: 0/unset → 32 default, then bounded to [8, 1024]. The high
+// ceiling lets large inventories (thousands of nodes) finish the initial sweep
+// in minutes instead of ~an hour; fd use is ~2× the worker count, well within a
+// raised nofile limit. Used by every write path (NewManager, SetProbeConcurrency)
+// so batch and periodic probes can never disagree on the ceiling.
+func clampProbeConcurrency(n int) int {
+	if n <= 0 {
+		n = 32
+	}
+	if n < 8 {
+		n = 8
+	}
+	if n > 1024 {
+		n = 1024
+	}
+	return n
+}
+
+// resolveProbeTarget derives the probe destination, TLS SNI host and strict-TLS
+// decision from a probe target string. Strict TLS is enabled only for an https
+// target when skip_cert_verify is off. It is pure so both NewManager and the
+// live SetProbeTarget reload path share identical parsing.
+func resolveProbeTarget(probeTarget string, skipCertVerify bool) (dst M.Socksaddr, host string, useTLS, ready bool) {
+	if probeTarget == "" {
+		return M.Socksaddr{}, "", false, false
+	}
+	target := probeTarget
+	isHTTPS := strings.HasPrefix(target, "https://")
+	// Strip URL scheme if present (e.g., "https://www.google.com:443" -> "www.google.com:443")
+	if strings.HasPrefix(target, "https://") {
+		target = strings.TrimPrefix(target, "https://")
+	} else if strings.HasPrefix(target, "http://") {
+		target = strings.TrimPrefix(target, "http://")
+	}
+	// Remove trailing path if present
+	if idx := strings.Index(target, "/"); idx != -1 {
+		target = target[:idx]
+	}
+	h, port, err := net.SplitHostPort(target)
+	if err != nil {
+		// If no port specified, use default based on original scheme
+		h = target
+		if isHTTPS {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return M.ParseSocksaddrHostPort(h, parsePort(port)), h, isHTTPS && !skipCertVerify, true
+}
+
 // NewManager constructs a manager and pre-validates the probe target.
 func NewManager(cfg Config) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		cfg:    cfg,
-		nodes:  make(map[string]*entry),
-		ctx:    ctx,
-		cancel: cancel,
+		cfg:              cfg,
+		nodes:            make(map[string]*entry),
+		ctx:              ctx,
+		cancel:           cancel,
+		probeConcurrency: clampProbeConcurrency(cfg.ProbeConcurrency),
 	}
-	if cfg.ProbeTarget != "" {
-		probeReq, ok := parseProbeRequest(cfg.ProbeTarget, cfg.SkipCertVerify)
-		if ok {
-			m.probeReq = probeReq
-			m.probeReady = true
-		}
-	}
+	m.probeDst, m.probeHost, m.probeTLS, m.probeReady = resolveProbeTarget(cfg.ProbeTarget, cfg.SkipCertVerify)
 	return m, nil
-}
-
-func parseProbeRequest(raw string, skipCertVerify bool) (ProbeRequest, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ProbeRequest{}, false
-	}
-
-	if strings.Contains(raw, "://") {
-		u, err := url.Parse(raw)
-		if err != nil || u.Hostname() == "" {
-			return ProbeRequest{}, false
-		}
-
-		scheme := strings.ToLower(u.Scheme)
-		if scheme == "" {
-			scheme = "http"
-		}
-		if scheme != "http" && scheme != "https" {
-			return ProbeRequest{}, false
-		}
-
-		host := u.Hostname()
-		port := u.Port()
-		if port == "" {
-			if scheme == "https" {
-				port = "443"
-			} else {
-				port = "80"
-			}
-		}
-
-		path := u.EscapedPath()
-		if path == "" {
-			path = "/"
-		}
-		if u.RawQuery != "" {
-			path += "?" + u.RawQuery
-		}
-
-		hostHeader := u.Host
-		if hostHeader == "" {
-			hostHeader = host
-		}
-
-		return ProbeRequest{
-			Destination:    M.ParseSocksaddrHostPort(host, parsePort(port)),
-			Scheme:         scheme,
-			HostHeader:     hostHeader,
-			ServerName:     host,
-			Path:           path,
-			SkipCertVerify: skipCertVerify,
-		}, true
-	}
-
-	target := raw
-	path := "/"
-	if idx := strings.Index(target, "/"); idx != -1 {
-		path = target[idx:]
-		target = target[:idx]
-		if path == "" {
-			path = "/"
-		}
-	}
-
-	host := target
-	port := "80"
-	if parsedHost, parsedPort, err := net.SplitHostPort(target); err == nil {
-		host = parsedHost
-		port = parsedPort
-	}
-
-	if host == "" {
-		return ProbeRequest{}, false
-	}
-
-	return ProbeRequest{
-		Destination:    M.ParseSocksaddrHostPort(host, parsePort(port)),
-		Scheme:         "http",
-		HostHeader:     target,
-		ServerName:     host,
-		Path:           path,
-		SkipCertVerify: skipCertVerify,
-	}, true
 }
 
 // SetLogger sets the logger for the manager.
@@ -232,14 +217,47 @@ func (m *Manager) SetLogger(logger Logger) {
 	m.logger = logger
 }
 
+// SetProbeConcurrency updates the worker limit used by periodic health checks.
+// Called when the live config changes so WebUI edits apply after a reload.
+func (m *Manager) SetProbeConcurrency(n int) {
+	n = clampProbeConcurrency(n)
+	m.mu.Lock()
+	m.probeConcurrency = n
+	m.mu.Unlock()
+}
+
+// ProbeConcurrency returns the current periodic-probe worker limit (clamped).
+func (m *Manager) ProbeConcurrency() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.probeConcurrency
+}
+
+// SetProbeTarget re-derives the probe destination and strict-TLS decision from
+// the live config so WebUI changes to probe_target / skip_cert_verify take
+// effect after a reload without a full process restart. The monitor Manager is
+// a long-lived singleton, so without this the startup-time target/TLS mode
+// would persist until the process restarts.
+func (m *Manager) SetProbeTarget(probeTarget string, skipCertVerify bool) {
+	dst, host, useTLS, ready := resolveProbeTarget(probeTarget, skipCertVerify)
+	m.mu.Lock()
+	m.probeDst, m.probeHost, m.probeTLS, m.probeReady = dst, host, useTLS, ready
+	m.mu.Unlock()
+}
+
 // StartPeriodicHealthCheck starts a background goroutine that periodically checks all nodes.
 // interval: how often to check (e.g., 30 * time.Second)
 // timeout: timeout for each probe (e.g., 10 * time.Second)
 func (m *Manager) StartPeriodicHealthCheck(interval, timeout time.Duration) {
 	if !m.probeReady {
+		// No probe target configured: nodes cannot be verified. Run probeAllNodes
+		// once so it marks every node initialCheckDone+available via its nil-probe
+		// branch — otherwise nodes stay initialCheckDone=false forever and both the
+		// export and the "healthy online" count read zero. Do not start the ticker.
 		if m.logger != nil {
-			m.logger.Warn("probe target not configured, periodic health check disabled")
+			m.logger.Warn("probe target not configured, marking all nodes available without verification")
 		}
+		m.probeAllNodes(timeout)
 		return
 	}
 
@@ -270,8 +288,43 @@ func (m *Manager) ProbeAllNow(timeout time.Duration) {
 	m.probeAllNodes(timeout)
 }
 
-// probeAllNodes checks all registered nodes concurrently.
+// probeAllNodes runs a health-check sweep, but only one at a time. If a sweep is
+// already in flight, the request is coalesced: exactly one additional sweep runs
+// after the current one finishes, so triggers that arrive mid-sweep (e.g. a
+// reload registering new nodes) are honored without stacking up overlapping
+// sweeps that would corrupt the shared progress counters and wedge the WebUI
+// progress bar "active" flag on.
 func (m *Manager) probeAllNodes(timeout time.Duration) {
+	m.probeGate.Lock()
+	if m.sweepRunning {
+		// A sweep is running: request one follow-up pass and return. The running
+		// sweep will pick this up when it drains the gate.
+		m.rerunRequested = true
+		m.probeGate.Unlock()
+		return
+	}
+	m.sweepRunning = true
+	m.probeGate.Unlock()
+
+	for {
+		m.runProbeSweep(timeout)
+
+		m.probeGate.Lock()
+		if m.rerunRequested {
+			m.rerunRequested = false
+			m.probeGate.Unlock()
+			continue // A trigger arrived mid-sweep; run exactly one more pass.
+		}
+		m.sweepRunning = false
+		m.probeGate.Unlock()
+		return
+	}
+}
+
+// runProbeSweep checks all registered nodes concurrently. It is only ever
+// invoked by probeAllNodes, which guarantees single-flight execution, so the
+// shared probeSweep* progress counters are never written by two sweeps at once.
+func (m *Manager) runProbeSweep(timeout time.Duration) {
 	m.mu.RLock()
 	entries := make([]*entry, 0, len(m.nodes))
 	for _, e := range m.nodes {
@@ -287,9 +340,20 @@ func (m *Manager) probeAllNodes(timeout time.Duration) {
 		m.logger.Info("starting health check for ", len(entries), " nodes")
 	}
 
-	workerLimit := runtime.NumCPU() * 2
-	if workerLimit < 20 {
-		workerLimit = 20
+	// Publish sweep progress for the WebUI. Reset counters, mark active, and
+	// clear the active flag when the sweep returns.
+	m.probeSweepTotal.Store(int32(len(entries)))
+	m.probeSweepDone.Store(0)
+	m.probeSweepOK.Store(0)
+	m.probeSweepFail.Store(0)
+	m.probeSweepActive.Store(1)
+	defer m.probeSweepActive.Store(0)
+
+	m.mu.RLock()
+	workerLimit := m.probeConcurrency
+	m.mu.RUnlock()
+	if workerLimit < 8 {
+		workerLimit = 8
 	}
 	sem := make(chan struct{}, workerLimit)
 	var wg sync.WaitGroup
@@ -303,6 +367,17 @@ func (m *Manager) probeAllNodes(timeout time.Duration) {
 		e.mu.RUnlock()
 
 		if probeFn == nil {
+			// No probe function (probe target not configured): the node cannot be
+			// verified, so optimistically mark it checked+available — matching the
+			// old per-pool startup probe's "no target → mark available" behavior.
+			// Skipping it instead would leave initialCheckDone=false forever and
+			// exclude it from export and the healthy-online count.
+			e.mu.Lock()
+			e.initialCheckDone = true
+			e.available = true
+			e.mu.Unlock()
+			m.probeSweepOK.Add(1)
+			m.probeSweepDone.Add(1)
 			continue
 		}
 
@@ -313,27 +388,59 @@ func (m *Manager) probeAllNodes(timeout time.Duration) {
 			defer func() { <-sem }()
 
 			ctx, cancel := context.WithTimeout(m.ctx, timeout)
-			latency, err := probe(ctx)
-			cancel()
+			defer cancel()
+
+			// Race the probe against its deadline. Some sing-box protocol dials
+			// block inside DialContext without honoring ctx, so a direct
+			// probe(ctx) call could never return — wedging this worker's
+			// semaphore slot and hanging the whole sweep (wg.Wait never returns;
+			// the dashboard shows a stuck init and 0 available even though the
+			// nodes are reachable). Run the probe in its own goroutine and select
+			// on ctx.Done() so the worker always returns within timeout. The
+			// buffered channel lets the stalled goroutine deliver its result
+			// later (its connection watchdog force-closes on ctx.Done) without
+			// blocking on send.
+			type probeOutcome struct {
+				latency time.Duration
+				err     error
+			}
+			resCh := make(chan probeOutcome, 1)
+			go func() {
+				latency, err := probe(ctx)
+				resCh <- probeOutcome{latency: latency, err: err}
+			}()
+
+			var latency time.Duration
+			var err error
+			select {
+			case out := <-resCh:
+				latency, err = out.latency, out.err
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
 
 			entry.mu.Lock()
+			uri := entry.info.URI
 			if err != nil {
 				failedCount.Add(1)
+				m.probeSweepFail.Add(1)
 				entry.lastError = err.Error()
 				entry.lastFail = time.Now()
 				entry.available = false
 				entry.initialCheckDone = true
 			} else {
 				availableCount.Add(1)
+				m.probeSweepOK.Add(1)
 				entry.lastOK = time.Now()
 				entry.lastProbe = latency
 				entry.available = true
 				entry.initialCheckDone = true
 			}
 			entry.mu.Unlock()
+			m.probeSweepDone.Add(1)
 
 			if err != nil && m.logger != nil {
-				m.logger.Warn("probe failed for ", tag, ": ", err)
+				m.logger.Warn("probe failed: ", FormatProbeFailure(tag, uri, err))
 			}
 		}(e, probeFn, tag)
 	}
@@ -349,19 +456,6 @@ func (m *Manager) Stop() {
 	if m.cancel != nil {
 		m.cancel()
 	}
-}
-
-// Reset 清空所有节点状态（Reload 时调用，释放旧 probe 闭包引用）
-func (m *Manager) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, e := range m.nodes {
-		e.mu.Lock()
-		e.probe = nil
-		e.release = nil
-		e.mu.Unlock()
-	}
-	m.nodes = make(map[string]*entry)
 }
 
 func parsePort(value string) uint16 {
@@ -397,12 +491,16 @@ func (m *Manager) ClearNodes() {
 	m.nodes = make(map[string]*entry)
 }
 
-// ProbeRequest returns the normalized request used for health checks.
-func (m *Manager) ProbeRequest() (ProbeRequest, bool) {
+// DestinationForProbe exposes the configured destination for health checks.
+// host is the probe target's hostname (used as TLS SNI); useTLS is true when
+// the probe must perform a TLS handshake with strict certificate verification.
+func (m *Manager) DestinationForProbe() (dest M.Socksaddr, host string, useTLS bool, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if !m.probeReady {
-		return ProbeRequest{}, false
+		return M.Socksaddr{}, "", false, false
 	}
-	return m.probeReq, true
+	return m.probeDst, m.probeHost, m.probeTLS, true
 }
 
 // Snapshot returns a sorted copy of current node states.
@@ -412,8 +510,10 @@ func (m *Manager) Snapshot() []Snapshot {
 }
 
 // SnapshotFiltered returns a sorted copy of current node states.
-// If onlyAvailable is true, only returns nodes that passed initial health check.
-// Nodes that haven't been checked yet are also included (they will be checked on first use).
+// If onlyAvailable is true, only returns nodes that have completed their initial
+// health check and are currently available. This ensures the export function and
+// the "healthy online" count in the WebUI use the same strict criterion: a node
+// must be verified available, not merely "not yet proven unavailable".
 func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 	m.mu.RLock()
 	list := make([]*entry, 0, len(m.nodes))
@@ -424,10 +524,11 @@ func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 	snapshots := make([]Snapshot, 0, len(list))
 	for _, e := range list {
 		snap := e.snapshot()
-		// 如果只要可用节点：
-		// - 跳过已完成检查但不可用的节点
-		// - 保留未完成检查的节点（它们会在首次使用时被检查）
-		if onlyAvailable && ((snap.InitialCheckDone && !snap.Available) || snap.Blacklisted) {
+		// When onlyAvailable is true, apply the same strict filter as the
+		// "healthy online" statistic: InitialCheckDone && Available. This
+		// excludes unchecked nodes (which the old logic optimistically included)
+		// so export count matches the WebUI display.
+		if onlyAvailable && (!snap.InitialCheckDone || !snap.Available || snap.Blacklisted) {
 			continue
 		}
 		snapshots = append(snapshots, snap)
@@ -455,6 +556,10 @@ func (m *Manager) SnapshotFiltered(onlyAvailable bool) []Snapshot {
 }
 
 // Probe triggers a manual health check.
+// It updates the full availability state (available / initialCheckDone / lastOK /
+// lastError) so that manual and batch probes are reflected in the dashboard and
+// SnapshotFiltered results immediately, matching the behaviour of the periodic
+// probeAllNodes loop.
 func (m *Manager) Probe(ctx context.Context, tag string) (time.Duration, error) {
 	e, err := m.entry(tag)
 	if err != nil {
@@ -463,11 +568,49 @@ func (m *Manager) Probe(ctx context.Context, tag string) (time.Duration, error) 
 	if e.probe == nil {
 		return 0, errors.New("probe not available for this node")
 	}
-	latency, err := e.probe(ctx)
+
+	// Enforce the context deadline at this level. Some sing-box outbound
+	// protocols block inside DialContext without honoring ctx cancellation, so a
+	// probe could otherwise never return — which in batch mode occupies a
+	// semaphore slot forever and freezes the whole run (wg.Wait never returns,
+	// WebUI stuck at "N/M"). Run the probe in its own goroutine and race it
+	// against ctx: if ctx fires first we return a timeout error and let the
+	// stuck goroutine unwind on its own (its conn watchdog force-closes on
+	// ctx.Done). The result channel is buffered so that late goroutine never
+	// blocks on send.
+	type probeOutcome struct {
+		latency time.Duration
+		err     error
+	}
+	resCh := make(chan probeOutcome, 1)
+	go func() {
+		latency, err := e.probe(ctx)
+		resCh <- probeOutcome{latency: latency, err: err}
+	}()
+
+	var latency time.Duration
+	select {
+	case out := <-resCh:
+		latency, err = out.latency, out.err
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+
+	e.mu.Lock()
+	e.initialCheckDone = true
+	if err != nil {
+		e.lastError = err.Error()
+		e.lastFail = time.Now()
+		e.available = false
+	} else {
+		e.lastOK = time.Now()
+		e.lastProbe = latency
+		e.available = true
+	}
+	e.mu.Unlock()
 	if err != nil {
 		return 0, err
 	}
-	e.recordProbeLatency(latency)
 	return latency, nil
 }
 
@@ -629,12 +772,6 @@ func (e *entry) setRelease(fn releaseFunc) {
 	e.release = fn
 }
 
-func (e *entry) recordProbeLatency(d time.Duration) {
-	e.mu.Lock()
-	e.lastProbe = d
-	e.mu.Unlock()
-}
-
 // RecordFailure updates failure counters.
 func (h *EntryHandle) RecordFailure(err error) {
 	if h == nil || h.ref == nil {
@@ -738,12 +875,16 @@ func (h *EntryHandle) MarkAvailable(available bool) {
 	h.ref.mu.Unlock()
 }
 
-// HealthState reports whether the initial probe has completed and whether the node is currently healthy.
-func (h *EntryHandle) HealthState() (initialCheckDone bool, available bool) {
+// LastLatency returns the last measured probe latency.
+// Returns 0 if no measurement is available yet.
+func (h *EntryHandle) LastLatency() time.Duration {
 	if h == nil || h.ref == nil {
-		return false, false
+		return 0
 	}
 	h.ref.mu.RLock()
 	defer h.ref.mu.RUnlock()
-	return h.ref.initialCheckDone, h.ref.available
+	if !h.ref.available {
+		return 0
+	}
+	return h.ref.lastProbe
 }

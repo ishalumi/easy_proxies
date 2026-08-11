@@ -5,12 +5,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
 	"math/rand"
 	"net"
-	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,11 +31,10 @@ const (
 	// Tag is the default outbound tag used by builder.
 	Tag = "proxy-pool"
 
-	modeSequential      = "sequential"
-	modeRandom          = "random"
-	modeBalance         = "balance"
-	startupProbeWorkers = 20
-	startupProbeTimeout = 15 * time.Second
+	modeSequential = "sequential"
+	modeRandom     = "random"
+	modeBalance    = "balance"
+	modeLatency    = "latency"
 )
 
 // Options controls pool outbound behaviour.
@@ -47,7 +43,15 @@ type Options struct {
 	Members           []string
 	FailureThreshold  int
 	BlacklistDuration time.Duration
-	Metadata          map[string]MemberMeta
+	// RetryEnabled toggles automatic fail-over on dial failure.
+	RetryEnabled bool
+	// RetryAttempts is the maximum total dial attempts (including the first).
+	// Multi-member pools pick a different member per retry; single-member pools retry the same member.
+	RetryAttempts int
+	Metadata      map[string]MemberMeta
+	// Sticky pins each client (by source IP) to a single member, only
+	// re-selecting when the pinned member becomes unavailable. Pool/hybrid entry only.
+	Sticky bool
 }
 
 // MemberMeta carries optional descriptive information for monitoring UI.
@@ -87,6 +91,9 @@ type poolOutbound struct {
 	rngMu          sync.Mutex // protects rng for random mode
 	monitor        *monitor.Manager
 	candidatesPool sync.Pool
+	sticky         bool
+	stickyMu       sync.Mutex        // protects stickyMap
+	stickyMap      map[string]string // sticky key (client source IP) -> member tag
 }
 
 func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger, tag string, options Options) (adapter.Outbound, error) {
@@ -109,16 +116,23 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 		mode:    normalized.Mode,
 		rng:     rand.New(rand.NewSource(time.Now().UnixNano())),
 		monitor: monitorMgr,
+		sticky:  normalized.Sticky,
 		candidatesPool: sync.Pool{
 			New: func() any {
 				return make([]*memberState, 0, memberCount)
 			},
 		},
 	}
+	if p.sticky {
+		p.stickyMap = make(map[string]string)
+	}
 
 	// Register nodes immediately if monitor is available
 	if monitorMgr != nil {
-		logger.Info("registering ", len(normalized.Members), " nodes to monitor")
+		if memberCount > 1 {
+			logger.Info("registering ", memberCount, " nodes to monitor")
+		}
+		registeredCount := 0
 		for _, memberTag := range normalized.Members {
 			// Acquire shared state for this tag (creates if not exists)
 			state := acquireSharedState(memberTag)
@@ -138,7 +152,7 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 			if entry != nil {
 				// Attach entry to shared state so all pool instances share it
 				state.attachEntry(entry)
-				logger.Info("registered node: ", memberTag)
+				registeredCount++
 				// Set probe, release, and blacklist functions immediately
 				entry.SetRelease(p.makeReleaseByTagFunc(memberTag))
 				entry.SetBlacklistFn(p.makeBlacklistByTagFunc(memberTag))
@@ -148,6 +162,9 @@ func newPool(ctx context.Context, _ adapter.Router, logger singlog.ContextLogger
 			} else {
 				logger.Warn("failed to register node: ", memberTag)
 			}
+		}
+		if memberCount > 1 {
+			logger.Info("registered ", registeredCount, " nodes to monitor")
 		}
 	} else {
 		logger.Warn("monitor manager is nil, skipping node registration")
@@ -166,6 +183,9 @@ func normalizeOptions(options Options) Options {
 	if options.BlacklistDuration <= 0 {
 		options.BlacklistDuration = 24 * time.Hour
 	}
+	if options.RetryAttempts <= 0 {
+		options.RetryAttempts = 3
+	}
 	if options.Metadata == nil {
 		options.Metadata = make(map[string]MemberMeta)
 	}
@@ -174,6 +194,8 @@ func normalizeOptions(options Options) Options {
 		options.Mode = modeRandom
 	case modeBalance:
 		options.Mode = modeBalance
+	case modeLatency:
+		options.Mode = modeLatency
 	default:
 		options.Mode = modeSequential
 	}
@@ -190,10 +212,11 @@ func (p *poolOutbound) Start(stage adapter.StartStage) error {
 	if err != nil {
 		return err
 	}
-	// 在初始化完成后，立即在后台触发健康检查
-	if p.monitor != nil {
-		go p.probeAllMembersOnStartup()
-	}
+	// Initial health checks are driven centrally by the monitor's probeAllNodes
+	// (StartPeriodicHealthCheck on boot, ProbeAllNow on reload), bounded by the
+	// configured probe concurrency. A per-pool startup probe re-probed the same
+	// nodes and, with one pool per node, required a process-wide semaphore to
+	// avoid fd exhaustion; routing all probing through the monitor removes both.
 	return nil
 }
 
@@ -252,130 +275,160 @@ func (p *poolOutbound) initializeMembersLocked() error {
 	return nil
 }
 
-// probeAllMembersOnStartup performs initial health checks on all members
-func (p *poolOutbound) probeAllMembersOnStartup() {
-	probeReq, ok := p.monitor.ProbeRequest()
-	if !ok {
-		p.logger.Warn("probe target not configured, skipping initial health check")
-		// 没有配置探测目标时，标记所有节点为可用
-		p.mu.Lock()
-		for _, member := range p.members {
-			if member.entry != nil {
-				member.entry.MarkInitialCheckDone(true)
-			}
-		}
-		p.mu.Unlock()
-		return
-	}
-
-	p.logger.Info("starting initial health check for all nodes")
-
-	p.mu.Lock()
-	members := make([]*memberState, len(p.members))
-	copy(members, p.members)
-	p.mu.Unlock()
-
-	workerLimit := startupProbeWorkers
-	if len(members) < workerLimit {
-		workerLimit = len(members)
-	}
-	if workerLimit == 0 {
-		return
-	}
-
-	sem := make(chan struct{}, workerLimit)
-	var wg sync.WaitGroup
-	var availableCount atomic.Int32
-	var failedCount atomic.Int32
-
-	for _, member := range members {
-		sem <- struct{}{}
-		wg.Add(1)
-
-		go func(member *memberState) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			ctx, cancel := context.WithTimeout(p.ctx, startupProbeTimeout)
-			defer cancel()
-
-			start := time.Now()
-			conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, probeReq.Destination)
-			if err != nil {
-				p.logger.Warn("initial probe failed for ", member.tag, ": ", err)
-				failedCount.Add(1)
-				if member.shared != nil {
-					member.shared.recordFailure(err, 1, p.options.BlacklistDuration)
-				} else if member.entry != nil {
-					member.entry.RecordFailure(err)
-				}
-				if member.entry != nil {
-					member.entry.MarkInitialCheckDone(false)
-				}
-				return
-			}
-
-			_, err = httpProbe(ctx, conn, probeReq)
-			conn.Close()
-			if err != nil {
-				p.logger.Warn("initial HTTP probe failed for ", member.tag, ": ", err)
-				failedCount.Add(1)
-				if member.shared != nil {
-					member.shared.recordFailure(err, 1, p.options.BlacklistDuration)
-				} else if member.entry != nil {
-					member.entry.RecordFailure(err)
-				}
-				if member.entry != nil {
-					member.entry.MarkInitialCheckDone(false)
-				}
-				return
-			}
-
-			latency := time.Since(start)
-			latencyMs := latency.Milliseconds()
-			p.logger.Info("initial probe success for ", member.tag, ", latency: ", latencyMs, "ms")
-			availableCount.Add(1)
-			if member.entry != nil {
-				member.entry.RecordSuccessWithLatency(latency)
-				member.entry.MarkInitialCheckDone(true)
-			}
-		}(member)
-	}
-
-	wg.Wait()
-	p.logger.Info("initial health check completed: ", availableCount.Load(), " available, ", failedCount.Load(), " failed")
-}
-
 func (p *poolOutbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	member, err := p.pickMember(network)
-	if err != nil {
-		return nil, err
+	maxAttempts := p.maxAttempts()
+	stickyKey := p.stickyKeyFromCtx(ctx)
+	singleMember := len(p.options.Members) <= 1
+	var tried map[string]bool
+	if !singleMember && maxAttempts > 1 {
+		tried = make(map[string]bool, maxAttempts)
 	}
-	p.incActive(member)
-	conn, err := member.outbound.DialContext(ctx, network, destination)
-	if err != nil {
-		p.decActive(member)
-		p.recordFailure(member, err)
-		return nil, err
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		member, err := p.pickMemberFiltered(network, tried, stickyKey)
+		if err != nil {
+			if lastErr != nil {
+				return nil, fmt.Errorf("%w (after %d attempt(s); last: %v)", err, attempt-1, lastErr)
+			}
+			return nil, err
+		}
+		p.incActive(member)
+		conn, dialErr := member.outbound.DialContext(ctx, network, destination)
+		if dialErr != nil {
+			p.decActive(member)
+			p.recordFailure(member, dialErr)
+			lastErr = dialErr
+			if tried != nil {
+				tried[member.tag] = true
+			}
+			if attempt < maxAttempts {
+				p.logger.Warn("dial via ", member.tag, " failed (attempt ", attempt, "/", maxAttempts, "), retrying: ", dialErr)
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			break
+		}
+		if attempt > 1 {
+			p.logger.Info("dial succeeded via ", member.tag, " after ", attempt, " attempts")
+		}
+		p.recordSuccess(member)
+		return p.wrapConn(conn, member), nil
 	}
-	p.recordSuccess(member)
-	return p.wrapConn(conn, member), nil
+	if lastErr == nil {
+		lastErr = E.New("no healthy proxy available")
+	}
+	return nil, fmt.Errorf("dial failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
 func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	member, err := p.pickMember(N.NetworkUDP)
-	if err != nil {
-		return nil, err
+	maxAttempts := p.maxAttempts()
+	stickyKey := p.stickyKeyFromCtx(ctx)
+	singleMember := len(p.options.Members) <= 1
+	var tried map[string]bool
+	if !singleMember && maxAttempts > 1 {
+		tried = make(map[string]bool, maxAttempts)
 	}
-	p.incActive(member)
-	conn, err := member.outbound.ListenPacket(ctx, destination)
-	if err != nil {
-		p.decActive(member)
-		p.recordFailure(member, err)
-		return nil, err
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		member, err := p.pickMemberFiltered(N.NetworkUDP, tried, stickyKey)
+		if err != nil {
+			if lastErr != nil {
+				return nil, fmt.Errorf("%w (after %d attempt(s); last: %v)", err, attempt-1, lastErr)
+			}
+			return nil, err
+		}
+		p.incActive(member)
+		conn, listenErr := member.outbound.ListenPacket(ctx, destination)
+		if listenErr != nil {
+			p.decActive(member)
+			p.recordFailure(member, listenErr)
+			lastErr = listenErr
+			if tried != nil {
+				tried[member.tag] = true
+			}
+			if attempt < maxAttempts {
+				p.logger.Warn("listen-packet via ", member.tag, " failed (attempt ", attempt, "/", maxAttempts, "), retrying: ", listenErr)
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			break
+		}
+		if attempt > 1 {
+			p.logger.Info("listen-packet succeeded via ", member.tag, " after ", attempt, " attempts")
+		}
+		p.recordSuccess(member)
+		return p.wrapPacketConn(conn, member), nil
 	}
-	p.recordSuccess(member)
-	return p.wrapPacketConn(conn, member), nil
+	if lastErr == nil {
+		lastErr = E.New("no healthy proxy available")
+	}
+	return nil, fmt.Errorf("listen-packet failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// maxAttempts returns the configured retry budget (>=1).
+func (p *poolOutbound) maxAttempts() int {
+	if !p.options.RetryEnabled {
+		return 1
+	}
+	if p.options.RetryAttempts < 1 {
+		return 1
+	}
+	return p.options.RetryAttempts
+}
+
+// pickMemberFiltered selects a healthy member, optionally excluding tags in `tried`.
+// When `tried` is nil or every healthy member has been tried, falls back to picking
+// any healthy member (ensuring single-member pools retry the same node).
+func (p *poolOutbound) pickMemberFiltered(network string, tried map[string]bool, stickyKey string) (*memberState, error) {
+	now := time.Now()
+	candidates := p.getCandidateBuffer()
+
+	p.mu.Lock()
+	if len(p.members) == 0 {
+		if err := p.initializeMembersLocked(); err != nil {
+			p.mu.Unlock()
+			p.putCandidateBuffer(candidates)
+			return nil, err
+		}
+	}
+	candidates = p.availableMembersLocked(now, network, candidates)
+	p.mu.Unlock()
+
+	if len(candidates) == 0 {
+		p.mu.Lock()
+		if p.releaseIfAllBlacklistedLocked(now) {
+			candidates = p.availableMembersLocked(now, network, candidates[:0])
+		}
+		p.mu.Unlock()
+	}
+
+	if len(candidates) == 0 {
+		p.putCandidateBuffer(candidates)
+		return nil, E.New("no healthy proxy available")
+	}
+
+	// Filter out members already tried in this request.
+	if len(tried) > 0 {
+		filtered := candidates[:0]
+		for _, m := range candidates {
+			if !tried[m.tag] {
+				filtered = append(filtered, m)
+			}
+		}
+		// If filtering left nothing, fall back to all candidates so we still
+		// dial something (matches per-node single-member retry semantics).
+		if len(filtered) > 0 {
+			candidates = filtered
+		}
+	}
+
+	member := p.selectMember(candidates, stickyKey)
+	p.putCandidateBuffer(candidates)
+	return member, nil
 }
 
 func (p *poolOutbound) pickMember(network string) (*memberState, error) {
@@ -406,68 +459,21 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 		return nil, E.New("no healthy proxy available")
 	}
 
-	member := p.selectMember(candidates)
+	member := p.selectMember(candidates, "")
 	p.putCandidateBuffer(candidates)
 	return member, nil
 }
 
 func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf []*memberState) []*memberState {
 	result := buf[:0]
-	healthyCount := 0
-	pendingCount := 0
-
 	for _, member := range p.members {
 		// Check blacklist via shared state (auto-clears if expired)
 		if member.shared != nil && member.shared.isBlacklisted(now) {
-			continue
-		}
-		if network != "" && !common.Contains(member.outbound.Network(), network) {
-			continue
-		}
-
-		initialDone, available := false, false
-		if member.entry != nil {
-			initialDone, available = member.entry.HealthState()
-		}
-
-		if initialDone && available {
-			result = append(result, member)
-			healthyCount++
-			continue
-		}
-		if !initialDone {
-			pendingCount++
-		}
-	}
-
-	if healthyCount > 0 {
-		return result
-	}
-
-	if pendingCount > 0 {
-		result = result[:0]
-		for _, member := range p.members {
-			if member.shared != nil && member.shared.isBlacklisted(now) {
-				continue
+			// Log blacklisted nodes for debugging
+			remaining := member.shared.blacklistRemaining(now)
+			if remaining > 0 {
+				p.logger.Debug("skipping blacklisted node: ", member.tag, ", remaining: ", remaining.Round(time.Second))
 			}
-			if network != "" && !common.Contains(member.outbound.Network(), network) {
-				continue
-			}
-
-			initialDone, _ := false, false
-			if member.entry != nil {
-				initialDone, _ = member.entry.HealthState()
-			}
-			if !initialDone {
-				result = append(result, member)
-			}
-		}
-		return result
-	}
-
-	result = result[:0]
-	for _, member := range p.members {
-		if member.shared != nil && member.shared.isBlacklisted(now) {
 			continue
 		}
 		if network != "" && !common.Contains(member.outbound.Network(), network) {
@@ -498,7 +504,54 @@ func (p *poolOutbound) releaseIfAllBlacklistedLocked(now time.Time) bool {
 	return true
 }
 
-func (p *poolOutbound) selectMember(candidates []*memberState) *memberState {
+const stickyFallbackKey = "_global_"
+
+// stickyKeyFromCtx returns the sticky key (client source IP) for this request,
+// or "" when stickiness is disabled. Falls back to a shared global key when the
+// source address cannot be determined, so such requests still pin together.
+func (p *poolOutbound) stickyKeyFromCtx(ctx context.Context) string {
+	if !p.sticky {
+		return ""
+	}
+	if md := adapter.ContextFrom(ctx); md != nil && md.Source.IsValid() {
+		return md.Source.AddrString()
+	}
+	return stickyFallbackKey
+}
+
+// selectMember picks a member, honouring stickiness when stickyKey is non-empty.
+func (p *poolOutbound) selectMember(candidates []*memberState, stickyKey string) *memberState {
+	if stickyKey != "" {
+		return p.selectSticky(candidates, stickyKey)
+	}
+	return p.selectByMode(candidates)
+}
+
+// selectSticky returns the member pinned to stickyKey if it is still among the
+// candidates; otherwise it selects a fresh member (by mode) and pins it. The
+// pin is permanent until the member drops out of the candidate set
+// (blacklisted/removed), at which point a new member is chosen and pinned.
+func (p *poolOutbound) selectSticky(candidates []*memberState, stickyKey string) *memberState {
+	p.stickyMu.Lock()
+	defer p.stickyMu.Unlock()
+	if tag, ok := p.stickyMap[stickyKey]; ok {
+		for _, member := range candidates {
+			if member.tag == tag {
+				return member
+			}
+		}
+		// Pinned member is no longer available: drop the stale pin and re-select.
+		delete(p.stickyMap, stickyKey)
+	}
+	member := p.selectByMode(candidates)
+	if member != nil {
+		p.stickyMap[stickyKey] = member.tag
+	}
+	return member
+}
+
+// selectByMode applies the configured scheduling strategy.
+func (p *poolOutbound) selectByMode(candidates []*memberState) *memberState {
 	switch p.mode {
 	case modeRandom:
 		p.rngMu.Lock()
@@ -519,6 +572,33 @@ func (p *poolOutbound) selectMember(candidates []*memberState) *memberState {
 			}
 		}
 		return selected
+	case modeLatency:
+		// Pick the candidate with the lowest measured latency.
+		// Candidates without a latency reading (never probed) are deprioritized;
+		// if all are unmeasured, fall back to round-robin.
+		var selected *memberState
+		var minLatency time.Duration
+		hasMeasured := false
+		for _, member := range candidates {
+			if member.entry == nil {
+				continue
+			}
+			latency := member.entry.LastLatency()
+			if latency <= 0 {
+				continue
+			}
+			if !hasMeasured || latency < minLatency {
+				selected = member
+				minLatency = latency
+				hasMeasured = true
+			}
+		}
+		if selected != nil {
+			return selected
+		}
+		// Fallback: no measurements yet — round-robin.
+		idx := int(p.rrCounter.Add(1)-1) % len(candidates)
+		return candidates[idx]
 	default:
 		idx := int(p.rrCounter.Add(1)-1) % len(candidates)
 		return candidates[idx]
@@ -530,11 +610,18 @@ func (p *poolOutbound) recordFailure(member *memberState, cause error) {
 		p.logger.Warn("proxy ", member.tag, " failure (no shared state): ", cause)
 		return
 	}
-	failures, blacklisted, _ := member.shared.recordFailure(cause, p.options.FailureThreshold, p.options.BlacklistDuration)
-	if blacklisted {
+	failures, blacklisted, until, transient := member.shared.recordFailure(cause, p.options.FailureThreshold, p.options.BlacklistDuration)
+	switch {
+	case transient:
+		// Transient (e.g. 429 rate-limit): short cooldown, not counted toward the
+		// 24h blacklist. The node is retried automatically once the cooldown ends.
+		p.logger.Warn("proxy ", member.tag, " transient failure, cooling down until ", until.Format("15:04:05"), ": ", cause)
+		log.Printf("[pool] %s transient failure, cooldown until %s: %v", member.tag, until.Format("15:04:05"), cause)
+	case blacklisted:
 		p.logger.Warn("proxy ", member.tag, " blacklisted for ", p.options.BlacklistDuration, ": ", cause)
-		log.Printf("[pool] %s blacklisted for %s: %v", member.tag, p.options.BlacklistDuration, cause)
-	} else {
+		log.Printf("⚠️  [pool] %s BLACKLISTED for %s (until %s): %v", member.tag, p.options.BlacklistDuration, until.Format("15:04:05"), cause)
+		log.Printf("    To release immediately, use WebUI or: POST /api/nodes/%s/release", member.tag)
+	default:
 		p.logger.Warn("proxy ", member.tag, " failure ", failures, "/", p.options.FailureThreshold, ": ", cause)
 		log.Printf("[pool] %s failure %d/%d: %v", member.tag, failures, p.options.FailureThreshold, cause)
 	}
@@ -566,106 +653,129 @@ func (p *poolOutbound) makeReleaseFunc(member *memberState) func() {
 	}
 }
 
+// upgradeProbeConn optionally upgrades a plain TCP connection to TLS with
+// strict certificate verification. When useTLS is false the connection is
+// returned unchanged. host is used as the TLS SNI. A handshake failure
+// (e.g. self-signed or hijacked certificate) is returned as an error so the
+// caller can record it and eventually blacklist the node.
+func upgradeProbeConn(ctx context.Context, conn net.Conn, host string, useTLS bool) (net.Conn, error) {
+	if !useTLS {
+		return conn, nil
+	}
+	tlsConn := tls.Client(conn, &tls.Config{
+		ServerName:         host,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: false,
+	})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		// Return the original connection so the caller's deferred Close keeps
+		// working; the failed handshake did not take over its lifetime.
+		return conn, fmt.Errorf("tls handshake: %w", err)
+	}
+	return tlsConn, nil
+}
+
 // httpProbe performs an HTTP probe through the connection and measures TTFB.
-// It follows the configured probe target scheme/path and requires a valid HTTP response.
-func httpProbe(ctx context.Context, conn net.Conn, probeReq monitor.ProbeRequest) (time.Duration, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// It sends a minimal HTTP request and waits for the first byte of response.
+func httpProbe(conn net.Conn, host string) (time.Duration, error) {
+	// Build HTTP request
+	req := fmt.Sprintf("GET /generate_204 HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Mozilla/5.0\r\n\r\n", host)
 
-	deadline := time.Now().Add(15 * time.Second)
-	if ctxDeadline, ok := ctx.Deadline(); ok {
-		deadline = ctxDeadline
-	}
-	_ = conn.SetDeadline(deadline)
+	// Try to set write deadline (ignore errors for connections that don't support it)
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 
+	// Record time just before sending request
 	start := time.Now()
-	probeConn := conn
 
-	if strings.EqualFold(probeReq.Scheme, "https") {
-		tlsConn := tls.Client(conn, &tls.Config{
-			ServerName:         probeReq.ServerName,
-			InsecureSkipVerify: probeReq.SkipCertVerify,
-		})
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return 0, fmt.Errorf("tls handshake: %w", err)
-		}
-		probeConn = tlsConn
-	}
-
-	path := probeReq.Path
-	if path == "" {
-		path = "/"
-	}
-	requestURL, err := url.ParseRequestURI(path)
-	if err != nil {
-		requestURL = &url.URL{Path: path}
-	}
-
-	req := &http.Request{
-		Method: http.MethodGet,
-		URL:    requestURL,
-		Host:   probeReq.HostHeader,
-		Header: make(http.Header),
-		Close:  true,
-	}
-	req.Header.Set("User-Agent", "easy-proxies/health-check")
-	req.Header.Set("Accept", "*/*")
-
-	if err := req.Write(probeConn); err != nil {
+	// Send HTTP request
+	if _, err := conn.Write([]byte(req)); err != nil {
 		return 0, fmt.Errorf("write request: %w", err)
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(probeConn), req)
+	// Try to set read deadline (ignore errors for connections that don't support it)
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+	// Read first byte (TTFB - Time To First Byte)
+	reader := bufio.NewReader(conn)
+	_, err := reader.ReadByte()
 	if err != nil {
 		return 0, fmt.Errorf("read response: %w", err)
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1))
 
-	return time.Since(start), nil
+	// Calculate TTFB
+	ttfb := time.Since(start)
+	return ttfb, nil
+}
+
+// probeMember dials the probe destination through a member and measures latency.
+// A context watchdog force-closes the underlying connection when ctx is cancelled
+// or its deadline fires. This is essential: some sing-box outbound connection
+// types do not honor SetDeadline, so without the watchdog a probe against a node
+// that accepts TCP but never sends an HTTP response would block on Read / the TLS
+// handshake forever, leaking goroutines and hanging the whole batch probe
+// (wg.Wait would never return, freezing the WebUI at "N/M").
+func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, destination M.Socksaddr, host string, useTLS bool) (time.Duration, error) {
+	start := time.Now()
+	rawConn, err := member.outbound.DialContext(ctx, N.NetworkTCP, destination)
+	if err != nil {
+		if member.entry != nil {
+			member.entry.RecordFailure(err)
+		}
+		return 0, err
+	}
+	// Watchdog: close the raw connection as soon as ctx is done so any blocked
+	// Read/Write/handshake below is unblocked even when SetDeadline is a no-op.
+	probeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = rawConn.Close()
+		case <-probeDone:
+		}
+	}()
+	defer close(probeDone)
+	defer rawConn.Close()
+
+	conn := rawConn
+	// Strict mode: upgrade to TLS and verify the certificate chain so that
+	// nodes whose exit hijacks TLS (self-signed certs) fail the probe.
+	if conn, err = upgradeProbeConn(ctx, conn, host, useTLS); err != nil {
+		if member.entry != nil {
+			member.entry.RecordFailure(err)
+		}
+		return 0, err
+	}
+
+	// Perform HTTP probe to measure actual latency (TTFB).
+	if _, err = httpProbe(conn, destination.AddrString()); err != nil {
+		if member.entry != nil {
+			member.entry.RecordFailure(err)
+		}
+		return 0, err
+	}
+
+	duration := time.Since(start)
+	if member.entry != nil {
+		member.entry.RecordSuccessWithLatency(duration)
+	}
+	// Clear pool blacklist on successful probe — a node that passes health check
+	// should be available for selection immediately (fixes #8, #9).
+	if member.shared != nil {
+		member.shared.forceRelease()
+	}
+	return duration, nil
 }
 
 func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Context) (time.Duration, error) {
 	if p.monitor == nil {
 		return nil
 	}
-	probeReq, ok := p.monitor.ProbeRequest()
+	destination, host, useTLS, ok := p.monitor.DestinationForProbe()
 	if !ok {
 		return nil
 	}
 	return func(ctx context.Context) (time.Duration, error) {
-		start := time.Now()
-		conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, probeReq.Destination)
-		if err != nil {
-			if member.entry != nil {
-				member.entry.RecordFailure(err)
-			}
-			return 0, err
-		}
-		defer conn.Close()
-
-		// Perform HTTP probe to measure actual latency (TTFB)
-		_, err = httpProbe(ctx, conn, probeReq)
-		if err != nil {
-			if member.entry != nil {
-				member.entry.RecordFailure(err)
-			}
-			return 0, err
-		}
-
-		// Total duration = dial time + HTTP probe
-		duration := time.Since(start)
-		if member.entry != nil {
-			member.entry.RecordSuccessWithLatency(duration)
-		}
-		// Clear pool blacklist on successful probe — a node that passes
-		// health check should be available for selection immediately,
-		// not remain blacklisted for the full duration (fixes #8, #9).
-		if member.shared != nil {
-			member.shared.forceRelease()
-		}
-		return duration, nil
+		return p.probeMember(ctx, member, destination, host, useTLS)
 	}
 }
 
@@ -674,7 +784,7 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 	if p.monitor == nil {
 		return nil
 	}
-	probeReq, ok := p.monitor.ProbeRequest()
+	destination, host, useTLS, ok := p.monitor.DestinationForProbe()
 	if !ok {
 		return nil
 	}
@@ -701,36 +811,7 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 		if member == nil {
 			return 0, E.New("member not found: ", tag)
 		}
-
-		start := time.Now()
-		conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, probeReq.Destination)
-		if err != nil {
-			if member.entry != nil {
-				member.entry.RecordFailure(err)
-			}
-			return 0, err
-		}
-		defer conn.Close()
-
-		// Perform HTTP probe to measure actual latency (TTFB)
-		_, err = httpProbe(ctx, conn, probeReq)
-		if err != nil {
-			if member.entry != nil {
-				member.entry.RecordFailure(err)
-			}
-			return 0, err
-		}
-
-		// Total duration = dial time + TTFB
-		duration := time.Since(start)
-		if member.entry != nil {
-			member.entry.RecordSuccessWithLatency(duration)
-		}
-		// Clear pool blacklist on successful probe (fixes #8, #9)
-		if member.shared != nil {
-			member.shared.forceRelease()
-		}
-		return duration, nil
+		return p.probeMember(ctx, member, destination, host, useTLS)
 	}
 }
 

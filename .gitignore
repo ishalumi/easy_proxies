@@ -8,6 +8,7 @@ easy_proxies-*
 # Configuration (contains sensitive data)
 config.yaml
 nodes.txt
+node_ports.json
 
 # GeoIP database (auto-downloaded)
 *.mmdb
@@ -42,3 +43,4 @@ coverage.html
 
 # AI tool artifacts
 .ace-tool/
+.codegraph/

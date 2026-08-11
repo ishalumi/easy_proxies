@@ -264,6 +264,15 @@
       font-size: 13px;
     }
     tr:hover { background: rgba(100,100,100,0.02); }
+
+    /* Truncate long names/URIs so the table layout stays intact */
+    .cell-trunc {
+      max-width: 260px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cell-trunc-uri { max-width: 360px; }
     
     .badge {
       padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500;
@@ -458,6 +467,7 @@
         <button class="btn btn-primary" onclick="probeAllNodes()">⚡ 批量探测</button>
         <button class="btn" id="refreshSubBtn" onclick="refreshSubscription()" style="display:none;">刷新订阅</button>
         <button class="btn" onclick="exportNodes()">导出配置</button>
+        <button class="btn" onclick="exportNodes(true)">全部导出</button>
         <button class="btn" onclick="toggleAutoRefresh()" id="autoRefreshBtn">⏹ 关闭自动刷新</button>
         <button class="btn" onclick="refresh()">↺ 刷新</button>
       </div>
@@ -549,6 +559,7 @@
               </tbody>
             </table>
             <div id="emptyState" style="display:none; text-align:center; padding: 40px; color: var(--text-muted);">暂无数据</div>
+            <div id="nodesPagingHint" style="display:none; text-align:center; padding: 12px; color: var(--text-muted); font-size: 12px;"></div>
           </div>
         </div>
       </div>
@@ -704,6 +715,7 @@
                     <option value="random">random - 随机</option>
                     <option value="round-robin">round-robin - 轮询</option>
                     <option value="balance">balance - 均衡</option>
+                    <option value="latency">latency - 最低延迟</option>
                   </select>
                 </div>
                 <div class="form-group"><label>故障阈值</label><input type="number" id="settingPoolFailure" class="setting-input" min="1" max="100" placeholder="3" /></div>
@@ -712,11 +724,26 @@
             </div>
 
             <div class="panel" style="margin-bottom: 16px;">
+              <div class="panel-header"><div class="panel-title">粘性代理 (Sticky Session)</div></div>
+              <div style="padding: 16px;">
+                <div class="checkbox-grid">
+                  <div class="checkbox-row"><input type="checkbox" id="settingStickyEnabled" /><label for="settingStickyEnabled">启用粘性代理（独立端口，按客户端来源 IP 固定上游节点）</label></div>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                  <div class="form-group"><label>粘性端口</label><input type="number" id="settingStickyPort" class="setting-input" min="1" max="65535" placeholder="2324（留空则为 listener 端口 +1）" /></div>
+                </div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">仅 pool / hybrid 模式生效。开启后会额外监听一个端口，与原 listener 端口共存；通过粘性端口接入的客户端会按来源 IP 永久绑定到同一上游节点（节点失效时自动重选）。</div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom: 16px;">
               <div class="panel-header"><div class="panel-title">管理面板 (Management)</div></div>
-              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+              <div style="padding: 16px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
                 <div class="form-group"><label>监听地址</label><input type="text" id="settingMgmtListen" class="setting-input" placeholder="0.0.0.0:8080" /></div>
                 <div class="form-group"><label>访问密码</label><input type="password" id="settingMgmtPassword" class="setting-input" /></div>
+                <div class="form-group"><label>探测并发数</label><input type="number" id="settingProbeConcurrency" class="setting-input" min="1" max="1024" placeholder="32" /></div>
               </div>
+              <div style="font-size: 11px; color: var(--text-muted); padding: 0 16px 12px;">探测并发数：初始/周期健康检查与批量探测的并发线程数（8-1024，默认 32），节点数多时调高可加快探测，修改后需重载核心生效</div>
             </div>
 
             <div class="panel" style="margin-bottom: 16px;">
@@ -869,7 +896,9 @@
     let isAutoRefresh = true;
     let autoRefreshInterval = null;
     let allNodesCache = [];
+    let sweepWasActive = false;
     let currentRegionFilter = 'all';
+    let nodeRenderLimit = 300;
     let isEditMode = false;
     let configNodes = [];
     let _savedSubSnapshot = '';
@@ -980,8 +1009,30 @@
     }
 
     function escapeHtml(text) {
-      if(!text) return '';
-      const div = document.createElement('div'); div.textContent = text; return div.innerHTML;
+      if(text == null) return '';
+      return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    }
+
+    // escapeAttrJs makes a value safe to embed inside a single-quoted JS string
+    // literal that itself sits inside a double-quoted HTML attribute
+    // (e.g. onclick="probeNode('${escapeAttrJs(tag)}')"). HTML-entity escaping
+    // alone is NOT enough here: the parser decodes entities before the JS runs,
+    // so an apostrophe would break out of the string (or inject code). We
+    // JS-escape first (backslash quotes/newlines), then HTML-encode so the
+    // backslash-escaped quotes survive attribute parsing.
+    function escapeAttrJs(text) {
+      if(text == null) return '';
+      return String(text)
+        .replace(/\\/g,'\\\\')
+        .replace(/'/g,"\\'")
+        .replace(/"/g,'\\"')
+        .replace(/`/g,'\\`')
+        .replace(/\r/g,'\\r')
+        .replace(/\n/g,'\\n')
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;');
     }
 
     async function refresh() {
@@ -993,8 +1044,31 @@
         updateDashboardStats(data);
         filterByRegion(currentRegionFilter);
         document.getElementById('lastUpdate').textContent = `Sync: ${new Date().toLocaleTimeString()}`;
+        updateSweepProgress(data.probe_sweep);
         fetchSubscriptionStatus();
       } catch(e) {}
+    }
+
+    // updateSweepProgress reflects the backend initial/periodic health-check
+    // sweep on the shared progress bar. It defers to an in-flight manual batch
+    // probe (isProbing) so the two never fight over the same widget.
+    function updateSweepProgress(sweep) {
+      if (isProbing) return;
+      const wrap = document.getElementById('probeProgress');
+      if (sweep && sweep.active && sweep.total > 0) {
+        document.getElementById('probeStats').textContent = `${sweep.done}/${sweep.total}`;
+        document.getElementById('probeSuccess').textContent = sweep.available;
+        document.getElementById('probeFail').textContent = sweep.failed;
+        const pct = sweep.total > 0 ? (sweep.done / sweep.total * 100) : 0;
+        document.getElementById('probeProgressFill').style.width = `${pct}%`;
+        wrap.classList.add('show');
+        sweepWasActive = true;
+      } else if (sweepWasActive) {
+        // Sweep just finished — briefly show 100% then hide.
+        document.getElementById('probeProgressFill').style.width = '100%';
+        sweepWasActive = false;
+        setTimeout(() => { if (!isProbing) wrap.classList.remove('show'); }, 1500);
+      }
     }
 
     function updateDashboardStats(data) {
@@ -1158,9 +1232,12 @@
 
     function renderNodes(nodes) {
       const tbody = document.getElementById('nodesTableBody');
-      if (!nodes.length) { tbody.innerHTML = ''; document.getElementById('emptyState').style.display='block'; return;}
+      const hint = document.getElementById('nodesPagingHint');
+      if (!nodes.length) { tbody.innerHTML = ''; document.getElementById('emptyState').style.display='block'; if(hint) hint.style.display='none'; return;}
       document.getElementById('emptyState').style.display='none';
-      tbody.innerHTML = nodes.map(n => {
+      // 分批渲染：节点量大时只渲染前 nodeRenderLimit 个，避免一次性插入数千行 DOM 导致卡顿。
+      const visible = nodes.slice(0, nodeRenderLimit);
+      tbody.innerHTML = visible.map(n => {
         const ms = n.last_latency_ms || -1;
         let badge = '', statusText = '';
         if (n.blacklisted) { badge = 'badge-error'; statusText = '拉黑 Blocked'; }
@@ -1172,8 +1249,8 @@
           <td><span class="badge ${badge}">${statusText}</span></td>
           <td>${EMOJIS[n.region||'other']} ${(n.region||'other').toUpperCase()}</td>
           <td>
-            <div style="font-weight: 500">${escapeHtml(n.name || n.tag)}</div>
-            <div style="font-size: 11px; color: var(--text-muted)">${escapeHtml(n.tag)}</div>
+            <div class="cell-trunc" style="font-weight: 500" title="${escapeHtml(n.name || n.tag)}">${escapeHtml(n.name || n.tag)}</div>
+            <div class="cell-trunc" style="font-size: 11px; color: var(--text-muted)" title="${escapeHtml(n.tag)}">${escapeHtml(n.tag)}</div>
           </td>
           <td class="tt-mono">${n.port || '-'}</td>
           <td>
@@ -1185,11 +1262,25 @@
           <td class="tt-mono">${n.active_connections||0}</td>
           <td class="tt-mono" style="color: ${n.failure_count>0 ? 'var(--error)' : 'inherit'}">${n.failure_count||0}</td>
           <td>
-            <button class="btn btn-sm" onclick="probeNode('${escapeHtml(n.tag)}')">探测</button>
-            ${n.blacklisted ? `<button class="btn btn-sm btn-primary" onclick="releaseNode('${escapeHtml(n.tag)}')">解封</button>` : `<button class="btn btn-sm btn-danger" onclick="blacklistNode('${escapeHtml(n.tag)}')">拉黑</button>`}
+            <button class="btn btn-sm" onclick="probeNode('${escapeAttrJs(n.tag)}')">探测</button>
+            ${n.blacklisted ? `<button class="btn btn-sm btn-primary" onclick="releaseNode('${escapeAttrJs(n.tag)}')">解封</button>` : `<button class="btn btn-sm btn-danger" onclick="blacklistNode('${escapeAttrJs(n.tag)}')">拉黑</button>`}
           </td>
         </tr>`;
       }).join('');
+      if (hint) {
+        if (nodes.length > visible.length) {
+          const more = Math.min(300, nodes.length - visible.length);
+          hint.style.display = 'block';
+          hint.innerHTML = `显示 ${visible.length} / ${nodes.length} 个节点 <button class="btn btn-sm" style="margin-left:10px" onclick="showMoreNodes()">显示更多 (+${more})</button>`;
+        } else {
+          hint.style.display = 'none';
+        }
+      }
+    }
+
+    function showMoreNodes() {
+      nodeRenderLimit += 300;
+      filterByRegion(currentRegionFilter);
     }
 
     async function probeNode(tag) {
@@ -1261,13 +1352,13 @@
       }
     }
 
-    async function exportNodes() {
+    async function exportNodes(all=false) {
       try {
-        const res = await fetch('/api/export');
+        const res = await fetch(all ? '/api/export?all=true' : '/api/export');
         if(!res.ok) throw new Error();
         const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = 'nodes.txt';
+        const a = document.createElement('a'); a.href = url; a.download = all ? 'nodes_all.txt' : 'nodes.txt';
         document.body.appendChild(a); a.click(); document.body.removeChild(a); window.URL.revokeObjectURL(url);
       } catch(e) { showToast('导出失败', 'error');}
     }
@@ -1306,13 +1397,13 @@
         const tbody = document.getElementById('configNodesTableBody');
         tbody.innerHTML = configNodes.map((n, i) => `
           <tr>
-            <td><strong>${escapeHtml(n.name)}</strong></td>
-            <td class="tt-mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(n.uri)}</td>
+            <td><strong class="cell-trunc" style="display:inline-block;vertical-align:bottom" title="${escapeHtml(n.name)}">${escapeHtml(n.name)}</strong></td>
+            <td class="tt-mono cell-trunc cell-trunc-uri" title="${escapeHtml(n.uri)}">${escapeHtml(n.uri)}</td>
             <td class="tt-mono">${n.port || '-'}</td>
             <td><span class="badge ${n.source==='subscription'?'badge-warning':'badge-healthy'}">${n.source||'manual'}</span></td>
             <td>
-              <button class="btn btn-sm" onclick="showEditNodeModal('${escapeHtml(n.name)}')">编辑</button>
-              <button class="btn btn-sm btn-danger" onclick="deleteNode('${escapeHtml(n.name)}')">删除</button>
+              <button class="btn btn-sm" onclick="showEditNodeModal('${escapeAttrJs(n.name)}')">编辑</button>
+              <button class="btn btn-sm btn-danger" onclick="deleteNode('${escapeAttrJs(n.name)}')">删除</button>
             </td>
           </tr>
         `).join('');
@@ -1364,7 +1455,7 @@
           const sr = calls>0 ? ((n.success_count||0)/calls*100).toFixed(1) : 0;
           const tl = (n.timeline||[]).map(t => `<div class="tl-dot ${t.success?'success':'error'}" title="${t.latency_ms}ms"></div>`).join('');
           return `<tr>
-            <td><strong>${escapeHtml(n.name)}</strong><br><span style="font-size:11px;color:var(--text-muted)">${escapeHtml(n.tag)}</span></td>
+            <td><strong class="cell-trunc" style="display:inline-block;vertical-align:bottom" title="${escapeHtml(n.name)}">${escapeHtml(n.name)}</strong><br><span class="cell-trunc" style="display:inline-block;vertical-align:bottom;font-size:11px;color:var(--text-muted)" title="${escapeHtml(n.tag)}">${escapeHtml(n.tag)}</span></td>
             <td class="tt-mono ${sr>80?'':'badge-error'}">${sr}%</td>
             <td class="tt-mono"><span style="color:var(--success)">${n.success_count||0}</span> / <span style="color:var(--error)">${n.failure_count||0}</span></td>
             <td class="tt-mono">${n.active_connections||0}</td>
@@ -1463,10 +1554,15 @@
         document.getElementById('settingPoolMode').value = pl.mode || 'random';
         document.getElementById('settingPoolFailure').value = pl.failure_threshold || 3;
         document.getElementById('settingPoolBlacklist').value = pl.blacklist_duration || '24h';
+        // Sticky
+        const st = d.sticky || {};
+        document.getElementById('settingStickyEnabled').checked = !!st.enabled;
+        document.getElementById('settingStickyPort').value = st.port || '';
         // Management
         const mgmt = d.management || {};
         document.getElementById('settingMgmtListen').value = mgmt.listen || '';
         document.getElementById('settingMgmtPassword').value = mgmt.password || '';
+        document.getElementById('settingProbeConcurrency').value = mgmt.probe_concurrency || 32;
         // GeoIP
         const geo = d.geoip || {};
         document.getElementById('settingGeoIPEnabled').checked = geo.enabled || false;
@@ -1516,8 +1612,11 @@
         pool_mode: document.getElementById('settingPoolMode').value,
         pool_failure: document.getElementById('settingPoolFailure').value,
         pool_blacklist: document.getElementById('settingPoolBlacklist').value,
+        sticky_enabled: document.getElementById('settingStickyEnabled').checked,
+        sticky_port: document.getElementById('settingStickyPort').value,
         mgmt_listen: document.getElementById('settingMgmtListen').value,
         mgmt_password: document.getElementById('settingMgmtPassword').value,
+        mgmt_probe_concurrency: document.getElementById('settingProbeConcurrency').value,
         geoip_enabled: document.getElementById('settingGeoIPEnabled').checked,
         geoip_db: document.getElementById('settingGeoIPDBPath').value,
         geoip_listen: document.getElementById('settingGeoIPListen').value,
@@ -1580,9 +1679,14 @@
             failure_threshold: parseInt(document.getElementById('settingPoolFailure').value) || 3,
             blacklist_duration: document.getElementById('settingPoolBlacklist').value || '24h',
           },
+          sticky: {
+            enabled: document.getElementById('settingStickyEnabled').checked,
+            port: parseInt(document.getElementById('settingStickyPort').value) || 0,
+          },
           management: {
             listen: document.getElementById('settingMgmtListen').value,
             password: document.getElementById('settingMgmtPassword').value,
+            probe_concurrency: parseInt(document.getElementById('settingProbeConcurrency').value) || 32,
           },
           log: {
             output: document.getElementById('settingLogOutput').value,
