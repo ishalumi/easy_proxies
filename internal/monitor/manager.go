@@ -888,3 +888,15 @@ func (h *EntryHandle) LastLatency() time.Duration {
 	}
 	return h.ref.lastProbe
 }
+
+// Availability returns (checked, available) for the node: whether the health
+// check has run at least once, and whether it currently passes. checked=false
+// means "not probed yet" (boot window) — callers must not filter on that.
+func (h *EntryHandle) Availability() (checked, available bool) {
+	if h == nil || h.ref == nil {
+		return false, false
+	}
+	h.ref.mu.RLock()
+	defer h.ref.mu.RUnlock()
+	return h.ref.initialCheckDone, h.ref.available
+}

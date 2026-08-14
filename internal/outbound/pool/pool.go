@@ -466,6 +466,7 @@ func (p *poolOutbound) pickMember(network string) (*memberState, error) {
 
 func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf []*memberState) []*memberState {
 	result := buf[:0]
+	skippedUnavailable := 0
 	for _, member := range p.members {
 		// Check blacklist via shared state (auto-clears if expired)
 		if member.shared != nil && member.shared.isBlacklisted(now) {
@@ -479,7 +480,33 @@ func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf
 		if network != "" && !common.Contains(member.outbound.Network(), network) {
 			continue
 		}
+		// Skip nodes that the monitor health check has marked unavailable
+		// (e.g. TLS handshake / transport handshake failures). The probe
+		// verdict is authoritative when available: dialing them only wastes
+		// attempts and surfaces TLS errors to callers.
+		if h := member.entry; h != nil {
+			if checked, ok := h.Availability(); checked && !ok {
+				skippedUnavailable++
+				continue
+			}
+		}
 		result = append(result, member)
+	}
+	// Fallback: if the availability filter emptied the pool (boot window where
+	// the sweep is still running, or a transient probe-target outage), return
+	// the non-blacklisted members anyway instead of refusing service. This
+	// mirrors releaseIfAllBlacklistedLocked's "don't go fully empty" intent.
+	if len(result) == 0 && skippedUnavailable > 0 {
+		for _, member := range p.members {
+			if member.shared != nil && member.shared.isBlacklisted(now) {
+				continue
+			}
+			if network != "" && !common.Contains(member.outbound.Network(), network) {
+				continue
+			}
+			result = append(result, member)
+		}
+		p.logger.Warn("availability filter emptied pool, falling back to non-blacklisted members")
 	}
 	return result
 }
